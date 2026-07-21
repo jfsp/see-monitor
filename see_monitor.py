@@ -48,16 +48,17 @@ def load_config() -> dict:
 
 def _setup_logging(verbose: bool):
     logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
+        level=logging.DEBUG if verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 @click.group()
-@click.option("-v", "--verbose", is_flag=True)
+@click.option("-v", "--verbose", is_flag=True,
+              help="Debug-level output (per-control detail + service diagnostics).")
 @click.pass_context
 def cli(ctx, verbose):
     _setup_logging(verbose)
-    ctx.obj = {"config": load_config()}
+    ctx.obj = {"config": load_config(), "verbose": verbose}
 
 
 @cli.command("init-db")
@@ -73,19 +74,190 @@ def init_db(ctx):
     click.echo(f"Database initialised at {db_path}")
 
 
+_CONTROLS = ["spf", "dkim", "dmarc", "starttls", "dnssec", "dane",
+             "mta_sts", "tlsrpt", "bimi"]
+_CTRL_LABEL = {"spf": "SPF", "dkim": "DKIM", "dmarc": "DMARC",
+               "starttls": "STARTTLS", "dnssec": "DNSSEC", "dane": "DANE",
+               "mta_sts": "MTA-STS", "tlsrpt": "TLS-RPT", "bimi": "BIMI"}
+_RATING_COLOR = {"not_implemented": "red", "medium": "yellow",
+                 "strong": "cyan", "very_strong": "green"}
+
+
+def _glyph(score):
+    if score is None:
+        return click.style("–", fg="bright_black")
+    if score == 0:
+        return click.style("✗", fg="red")
+    if score < 100:
+        return click.style("~", fg="yellow")
+    return click.style("✓", fg="green")
+
+
+def _render_scan(scan: dict, a: dict, verbose: bool) -> str:
+    checks = scan.get("checks", {})
+    svc = scan.get("services", {})
+    cs = a.get("control_scores", {})
+    L = []
+    bar = "━" * 60
+    L.append(click.style(f"━━ {a['domain']} ", bold=True)
+             + click.style(bar[len(a['domain']) + 4:], fg="bright_black"))
+
+    rating = a["rating"]
+    L.append(f"  Score       {click.style(str(a['score']), bold=True)} / 100   "
+             + click.style(f"({rating})", fg=_RATING_COLOR.get(rating)))
+
+    mx = checks.get("mx", {})
+    hosts = [m["host"] for m in mx.get("mx_hosts", [])]
+    if a.get("no_mail"):
+        L.append("  Mail        " + click.style("no inbound mail "
+                 "(no MX / null MX) — transport controls n/a", fg="bright_black"))
+    else:
+        shown = ", ".join(hosts[:4]) + (" …" if len(hosts) > 4 else "")
+        L.append(f"  Mail        MX: {len(hosts)}"
+                 + (f"  →  {shown}" if hosts else ""))
+
+    # Control glyph line(s)
+    cells = [f"{_glyph(cs.get(c))} {_CTRL_LABEL[c]}"
+             f"{'' if cs.get(c) is None else ' ' + str(cs.get(c))}"
+             for c in _CONTROLS]
+    L.append("  Controls    " + "   ".join(cells[:4]))
+    L.append("              " + "   ".join(cells[4:]))
+
+    findings = a.get("findings", [])
+    if findings:
+        sev = {"critical": 0, "warning": 0, "info": 0}
+        for f in findings:
+            sev[f.get("severity", "info")] = sev.get(f.get("severity"), 0) + 1
+        L.append(f"  Findings    {len(findings)}  ("
+                 + click.style(f"{sev['critical']} critical", fg='red') + " · "
+                 + click.style(f"{sev['warning']} warning", fg='yellow') + " · "
+                 + f"{sev['info']} info)")
+
+    # External sources
+    L.append("  Sources     " + _render_sources(svc, indent="              "))
+
+    if not verbose:
+        return "\n".join(L)
+
+    # ---------------- Debug detail ----------------
+    L.append(click.style("  · detail ·", fg="bright_black"))
+
+    def rec(label, value):
+        if value:
+            L.append(f"    {label:<11} {value}")
+
+    spf = checks.get("spf", {})
+    rec("SPF", spf.get("record") or "(none)")
+    if spf.get("lookup_count"):
+        rec("", f"all={spf.get('all_qualifier')}  lookups={spf.get('lookup_count')}"
+            + ("  OVER LIMIT" if spf.get("exceeds_lookup_limit") else ""))
+
+    dkim = checks.get("dkim", {})
+    if dkim.get("selectors"):
+        for s in dkim["selectors"]:
+            rec("DKIM", f"{s['selector']} ({s['source']})  "
+                f"{s.get('key_type')}/{s.get('key_bits') or '?'}  "
+                + click.style(s['status'],
+                              fg=('green' if s['status'] == 'strong'
+                                  else 'yellow' if s['status'] == 'weak'
+                                  else 'red')))
+    else:
+        rec("DKIM", "no selectors confirmed")
+
+    dmarc = checks.get("dmarc", {})
+    rec("DMARC", dmarc.get("record") or "(none)")
+
+    dnssec = checks.get("dnssec", {})
+    rec("DNSSEC", f"signed={dnssec.get('signed')} "
+        f"validated={dnssec.get('validated')}")
+
+    dane = checks.get("dane", {})
+    if dane.get("applicable"):
+        rec("DANE", f"coverage={dane.get('coverage')} usable={dane.get('usable')}")
+
+    sts = checks.get("mta_sts", {})
+    if sts.get("present"):
+        rec("MTA-STS", f"mode={sts.get('mode')} fetched={sts.get('policy_fetched')}")
+
+    st = checks.get("starttls", {})
+    for host, v in (st.get("hosts", {}) or {}).items():
+        flag = click.style(" WEAK-TLS", fg="red") if v.get("weak_tls") else ""
+        rec("STARTTLS", f"{host}: {'ok' if v.get('starttls_ok') else 'no'} "
+            f"{v.get('tls_version') or ''} via {v.get('source')}{flag}")
+
+    intel = (checks.get("intel", {}) or {}).get("securitytrails", {})
+    if intel.get("mail_hosts"):
+        rec("ST mail", ", ".join(intel["mail_hosts"][:8]))
+
+    # per-service diagnostics with errors
+    for name in ("shodan", "censys", "active_smtp", "dnsdumpster",
+                 "securitytrails"):
+        s = svc.get(name, {})
+        if s.get("error"):
+            rec(name, click.style(f"error: {s['error']}", fg="red"))
+
+    for f in findings:
+        col = {"critical": "red", "warning": "yellow"}.get(f["severity"])
+        L.append(f"    {click.style('•', fg=col)} "
+                 f"[{f['control']}] {f['message']}")
+
+    return "\n".join(L)
+
+
+def _render_sources(svc: dict, indent: str) -> str:
+    parts = []
+    st = svc.get("securitytrails", {})
+    if st.get("available"):
+        if st.get("error"):
+            parts.append(click.style(f"SecurityTrails: {st['error']}", fg="red"))
+        else:
+            parts.append(f"SecurityTrails: MX×{st.get('mx', 0)}, "
+                         f"{st.get('selectors', 0)} selectors, "
+                         f"{st.get('subdomains', 0)} subdomains")
+    dd = svc.get("dnsdumpster", {})
+    if dd.get("available"):
+        if dd.get("error"):
+            parts.append(click.style(f"DNSDumpster: {dd['error']}", fg="red"))
+        else:
+            parts.append(f"DNSDumpster: {dd.get('selectors', 0)} selectors")
+    for key, lbl in (("shodan", "Shodan"), ("censys", "Censys")):
+        s = svc.get(key, {})
+        if s.get("available"):
+            parts.append(f"{lbl}: STARTTLS {s.get('mx_covered', 0)}/"
+                         f"{s.get('mx_total', 0)} MX")
+    act = svc.get("active_smtp", {})
+    if act.get("used"):
+        parts.append(f"active SMTP: {act.get('mx_covered', 0)}/"
+                     f"{act.get('mx_total', 0)} MX")
+    if not parts:
+        return click.style("none configured (DNS + wordlist only)",
+                           fg="bright_black")
+    # first item inline, rest indented on new lines
+    return ("\n" + indent).join(parts)
+
+
 @cli.command()
 @click.argument("domains", nargs=-1)
 @click.option("--list", "list_file", type=click.Path(exists=True),
               help="File with one domain per line.")
-@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON only.")
+@click.option("-q", "--quiet", is_flag=True,
+              help="One terse line per domain (score + rating).")
 @click.pass_context
-def scan(ctx, domains, list_file, as_json):
-    """Scan and assess one or more domains."""
+def scan(ctx, domains, list_file, as_json, quiet):
+    """Scan and assess one or more domains.
+
+    Default output is a per-domain summary showing what was found and which
+    external services (SecurityTrails, DNSDumpster, Shodan, Censys) were used.
+    Add -v for full per-control detail and service diagnostics; --quiet for a
+    single line per domain; --json for machine-readable output.
+    """
     from data.database import Database
     from scanner.orchestrator import ScanOrchestrator
     from scanner.assessor import assess_domain
 
     cfg = ctx.obj["config"]
+    verbose = ctx.obj.get("verbose", False)
     targets = list(domains)
     if list_file:
         with open(list_file, encoding="utf-8") as fh:
@@ -97,6 +269,16 @@ def scan(ctx, domains, list_file, as_json):
 
     db = Database(cfg.get("db_path", "data/see_monitor.db"))
     orch = ScanOrchestrator(cfg, db=db)
+
+    if not as_json and not quiet:
+        active = [n for n, s in (
+            ("SecurityTrails", orch.securitytrails), ("DNSDumpster", orch.dnsdumpster),
+            ("Shodan", orch.shodan), ("Censys", orch.censys)) if s.available]
+        click.echo("Scanning {} domain(s). External sources: {}".format(
+            len(targets),
+            ", ".join(active) if active else "none (authoritative DNS + wordlist)"))
+        click.echo()
+
     run_id = db.create_run(targets, trigger="cli")
     results = []
     for d in targets:
@@ -106,8 +288,13 @@ def scan(ctx, domains, list_file, as_json):
         db.save_assessment(run_id, a)
         db.bump_run_progress(run_id)
         results.append(a)
-        if not as_json:
+        if as_json:
+            continue
+        if quiet:
             click.echo(f"{d:<40} {a['score']:>5}  {a['rating']}")
+        else:
+            click.echo(_render_scan(scan_res, a, verbose))
+            click.echo()
     db.finish_run(run_id)
     if as_json:
         click.echo(json.dumps(results, indent=2))
