@@ -26,6 +26,14 @@ censys:
   api_id: ""
   api_secret: ""
 
+# DNSDumpster (optional) — used ONLY to discover DKIM selector names that are
+# hard to guess (e.g. ESP CNAME-delegated selectors). Discovered selectors are
+# always re-confirmed with an authoritative DNS lookup before they affect
+# scoring; DNSDumpster data is never trusted for scoring directly. Leave empty
+# to rely on the common-selector wordlist plus per-domain registered selectors.
+dnsdumpster:
+  api_key: ""
+
 # --- Scoring overrides (optional) -----------------------------------------
 # Anything set here overrides guidelines/nist_800_177r1.json.
 # scoring:

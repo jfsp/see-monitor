@@ -22,6 +22,7 @@ from scanner.policy_checks import (
 from scanner.smtp_tls_check import check_starttls
 from scanner.shodan_client import ShodanClient
 from scanner.censys_client import CensysClient
+from scanner.dnsdumpster_client import DNSDumpsterClient
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,8 @@ class ScanOrchestrator:
         censys_cfg = cfg.get("censys") or {}
         self.censys = CensysClient(
             censys_cfg.get("api_id"), censys_cfg.get("api_secret"))
+        self.dnsdumpster = DNSDumpsterClient(
+            (cfg.get("dnsdumpster") or {}).get("api_key"))
 
     # ------------------------------------------------------------------
     def scan_domain(self, domain: str,
@@ -70,9 +73,15 @@ class ScanOrchestrator:
         mx_hosts = [m["host"] for m in mx["mx_hosts"]]
 
         checks["spf"] = self._safe(check_spf, domain, self.dns)
+        passive_selectors = []
+        if self.dnsdumpster.available:
+            try:
+                passive_selectors = self.dnsdumpster.discover_selectors(domain)
+            except Exception:
+                logger.debug("DNSDumpster selector discovery failed", exc_info=True)
         checks["dkim"] = self._safe(
             check_dkim, domain, registered_selectors, self.dns,
-            self.dkim_wordlist)
+            self.dkim_wordlist, passive_selectors)
         checks["dmarc"] = self._safe(check_dmarc, domain, self.dns)
         checks["dnssec"] = self._safe(check_dnssec, domain, self.dns)
         dnssec_valid = bool(checks["dnssec"].get("signed")

@@ -123,15 +123,28 @@ organisations is carried over from PQC-Monitor and drives the group reports.
 
 ## Registering DKIM selectors
 
-DKIM selectors cannot be enumerated from DNS. SEE-Monitor probes a wordlist of
-common ESP selectors, but for accurate scoring register a domain's real
-selectors from its detail page (or the API):
+DKIM selectors cannot be enumerated from DNS. SEE-Monitor discovers them from
+three sources, highest-confidence first:
+
+1. **Per-domain registered selectors** — added by analysts from a domain's
+   detail page or the API.
+2. **DNSDumpster (optional)** — if `dnsdumpster.api_key` is set, SEE-Monitor
+   harvests `<selector>._domainkey.<domain>` names observed by DNSDumpster
+   (this reliably catches ESP CNAME-delegated selectors such as Microsoft
+   365's `selector1`/`selector2`).
+3. **Common-selector wordlist** — built-in ESP defaults.
+
+**Every candidate, whatever its source, is confirmed with an authoritative TXT
+lookup before it can affect scoring** — DNSDumpster data is never trusted for
+scoring directly. Register a domain's real selectors for the most reliable
+result:
 
 ```
 POST /app/api/domain/<domain>/selectors   {"selector": "s1"}
 ```
 
-Discovered selectors are also persisted automatically for future scans.
+Confirmed selectors (including those surfaced by DNSDumpster) are persisted
+automatically and reused on future scans.
 
 ---
 

@@ -121,6 +121,42 @@ def test_app_factory_and_login():
     assert client.get("/app/api/summary").status_code == 200
 
 
+def test_dnsdumpster_selector_extraction():
+    from scanner.dnsdumpster_client import extract_selectors, DNSDumpsterClient
+    payload = {
+        "cname": [
+            {"host": "selector1._domainkey.example.com",
+             "target": "selector1-example-com._domainkey.example.onmicrosoft.com"},
+        ],
+        "txt": ['k3._domainkey.example.com "v=DKIM1; p=..."'],
+        "foreign": [{"host": "sel._domainkey.sub.example.com"}],
+    }
+    sels = set(extract_selectors(payload, "example.com"))
+    assert sels == {"selector1", "k3"}          # host + txt captured
+    assert "selector1-example-com" not in sels  # CNAME target ignored
+    assert "sel" not in sels                     # different zone ignored
+    # No API key => discovery is a safe no-op
+    assert DNSDumpsterClient(None).discover_selectors("example.com") == []
+
+
+def test_dkim_confirms_passive_selector():
+    """A DNSDumpster-discovered selector must still be TXT-confirmed."""
+    from scanner import dkim_check
+
+    class FakeDNS:
+        def txt(self, name):
+            if name == "odd-selector._domainkey.example.com":
+                return ["v=DKIM1; k=rsa; p=" + "A" * 400]  # ~2048-bit-ish
+            return []
+
+    res = dkim_check.check_dkim("example.com", registered_selectors=[],
+                                dns_client=FakeDNS(), use_wordlist=False,
+                                passive_selectors=["odd-selector"])
+    assert res["present"] is True
+    assert res["selectors"][0]["selector"] == "odd-selector"
+    assert res["selectors"][0]["source"] == "dnsdumpster"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

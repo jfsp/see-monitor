@@ -104,15 +104,21 @@ def _selector_status(rec: dict) -> str:
 
 def check_dkim(domain: str, registered_selectors: list[str] | None = None,
                dns_client: DNSClient | None = None,
-               use_wordlist: bool = True) -> dict:
+               use_wordlist: bool = True,
+               passive_selectors: list[str] | None = None) -> dict:
     """
+    Discovery order (highest confidence first): per-domain registered
+    selectors, selectors surfaced by passive sources (e.g. DNSDumpster), then
+    the common-selector wordlist. Every candidate — whatever its source — is
+    confirmed with an authoritative TXT lookup before it counts.
+
     Returns:
       {
         "control": "dkim", "present": bool,
         "selectors": [
-          {"selector": str, "source": "registered"|"wordlist", "record": str,
-           "key_type": str, "key_bits": int|None, "testing": bool,
-           "revoked": bool, "status": str}
+          {"selector": str, "source": "registered"|"dnsdumpster"|"wordlist",
+           "record": str, "key_type": str, "key_bits": int|None,
+           "testing": bool, "revoked": bool, "status": str}
         ],
         "best_status": "strong"|"weak"|"very_weak"|"revoked"|None,
         "any_testing": bool, "issues": [str],
@@ -128,6 +134,11 @@ def check_dkim(domain: str, registered_selectors: list[str] | None = None,
         s = s.strip().lower()
         if s and s not in seen:
             candidates.append((s, "registered"))
+            seen.add(s)
+    for s in (passive_selectors or []):
+        s = s.strip().lower()
+        if s and s not in seen:
+            candidates.append((s, "dnsdumpster"))
             seen.add(s)
     if use_wordlist:
         for s in COMMON_SELECTORS:
