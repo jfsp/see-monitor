@@ -30,8 +30,14 @@ codebase, but is a new tool with an email-security scope and a fresh database.
 STARTTLS evidence is gathered **passive-first**: Shodan is consulted first,
 then Censys as an alternative (both via API). An active, non-intrusive SMTP
 STARTTLS probe (EHLO → STARTTLS → handshake → QUIT) is used as a fallback only
-when passive sources have no data and `scanning.active_smtp` is enabled. All
-other checks are ordinary DNS/HTTPS lookups.
+when passive sources have no data and `scanning.active_smtp` is enabled.
+
+DKIM selectors are discovered from **SecurityTrails** and **DNSDumpster** when
+API keys are configured (see below), in addition to per-domain registered
+selectors and the common-selector wordlist. All other checks are ordinary
+DNS/HTTPS lookups. Every passive result — MX cross-checks and every DKIM
+selector alike — is re-confirmed against authoritative DNS before it can affect
+scoring; passive sources never feed the score directly.
 
 ---
 
@@ -73,8 +79,12 @@ cp config/config.yaml.example config/config.yaml   # then edit
 python see_monitor.py init-db                       # creates schema + admin
 
 # scan from the CLI
-python see_monitor.py scan example.com example.org
-python see_monitor.py scan --list domains.txt --json
+python see_monitor.py scan example.com example.org   # per-domain summary
+python see_monitor.py -v scan example.com            # debug: records, per-MX
+                                                     #   STARTTLS, findings,
+                                                     #   service diagnostics
+python see_monitor.py scan --quiet --list domains.txt   # one line per domain
+python see_monitor.py scan --json example.com        # machine-readable
 
 # run the web app (dev server)
 python see_monitor.py serve --host 127.0.0.1 --port 8080
@@ -128,11 +138,16 @@ three sources, highest-confidence first:
 
 1. **Per-domain registered selectors** — added by analysts from a domain's
    detail page or the API.
-2. **DNSDumpster (optional)** — if `dnsdumpster.api_key` is set, SEE-Monitor
-   harvests `<selector>._domainkey.<domain>` names observed by DNSDumpster
-   (this reliably catches ESP CNAME-delegated selectors such as Microsoft
-   365's `selector1`/`selector2`).
-3. **Common-selector wordlist** — built-in ESP defaults.
+2. **SecurityTrails (optional)** — if `securitytrails.api_key` is set,
+   SEE-Monitor enumerates observed subdomains and extracts
+   `<selector>._domainkey` names. As a name-indexed passive-DNS database it
+   also catches rotated/historical and ESP-delegated selectors a wordlist
+   would miss, and provides an MX / mail-subdomain cross-check.
+3. **DNSDumpster (optional)** — if `dnsdumpster.api_key` is set, SEE-Monitor
+   harvests `<selector>._domainkey.<domain>` names from its host inventory
+   (reliably catches ESP CNAME-delegated selectors such as Microsoft 365's
+   `selector1`/`selector2`).
+4. **Common-selector wordlist** — built-in ESP defaults.
 
 **Every candidate, whatever its source, is confirmed with an authoritative TXT
 lookup before it can affect scoring** — DNSDumpster data is never trusted for
