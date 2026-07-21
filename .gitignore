@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.log
+config/config.yaml
+.env
+*.pem
+*.key
+*.p12
+.pytest_cache/

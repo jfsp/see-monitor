@@ -1,0 +1,25 @@
+# SEE-Monitor: System Target
+# Groups all SEE-Monitor services so they can be managed together.
+#
+# Usage:
+#   sudo systemctl start   see-monitor.target   # start everything
+#   sudo systemctl stop    see-monitor.target   # stop everything
+#   sudo systemctl restart see-monitor.target   # restart everything
+#   sudo systemctl enable  see-monitor.target   # start on boot
+#   sudo systemctl status  see-monitor.target   # show combined status
+#
+# Installation:
+#   sudo cp systemd/see-monitor.target /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now see-monitor.target
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Unit]
+Description=SEE-Monitor (all services)
+Documentation=https://github.com/your-org/see-monitor
+After=network-online.target
+Wants=see-monitor-web.service see-monitor-scheduler.service
+
+[Install]
+WantedBy=multi-user.target

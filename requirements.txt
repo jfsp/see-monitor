@@ -1,0 +1,33 @@
+# SEE-Monitor requirements
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Web framework & dashboard
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# TLS / certificate parsing (STARTTLS probe, DKIM key sizing)
+cryptography>=42.0.0
+
+# DNS
+dnspython>=2.6.0
+
+# HTTP (MTA-STS policy fetch, Shodan/Censys APIs)
+requests>=2.31.0
+
+# Passive intelligence (optional at runtime; API keys via config)
+shodan>=1.31.0
+
+# Scheduling
+APScheduler>=3.10.4
+
+# Configuration
+pyyaml>=6.0.1
+
+# CLI
+click>=8.1.7
+
+# WSGI server for production
+gunicorn>=22.0.0
+
+# Auth password hashing is provided by werkzeug (pulled in by flask).
+# Database uses the built-in sqlite3 module.

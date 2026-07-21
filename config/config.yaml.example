@@ -1,0 +1,46 @@
+# SEE-Monitor configuration
+# Copy to config/config.yaml and adjust. Environment variables override some
+# values (SEE_SECRET_KEY, SEE_CONFIG).
+
+# --- Web / storage ---------------------------------------------------------
+db_path: data/see_monitor.db
+secret_key: ""            # set a long random value, or use SEE_SECRET_KEY env
+https_enabled: false      # true only behind a TLS-terminating reverse proxy
+
+# --- Scanning --------------------------------------------------------------
+scanning:
+  timeout: 10             # per-connection timeout (seconds)
+  active_smtp: true       # allow active STARTTLS probing when passive data is
+                          # unavailable (Shodan/Censys). Set false for
+                          # fully-passive operation.
+  dkim_wordlist: true     # probe common DKIM selectors in addition to
+                          # per-domain registered selectors
+  nameservers: []         # e.g. ["8.8.8.8", "1.1.1.1"]; empty = system default
+
+# --- Passive intelligence sources -----------------------------------------
+# Shodan is consulted first; Censys is used as an alternative when configured.
+shodan:
+  api_key: ""
+
+censys:
+  api_id: ""
+  api_secret: ""
+
+# --- Scoring overrides (optional) -----------------------------------------
+# Anything set here overrides guidelines/nist_800_177r1.json.
+# scoring:
+#   weights:
+#     dmarc: 0.25
+#     spf: 0.15
+#     dkim: 0.15
+#     starttls: 0.12
+#     dnssec: 0.10
+#     dane: 0.08
+#     mta_sts: 0.08
+#     tlsrpt: 0.04
+#     bimi: 0.03
+#   rating_bands:
+#     - {rating: not_implemented, min_score: 0,  label: "Not implemented / Weak"}
+#     - {rating: medium,          min_score: 30, label: "Medium"}
+#     - {rating: strong,          min_score: 60, label: "Strong"}
+#     - {rating: very_strong,     min_score: 85, label: "Very strong"}

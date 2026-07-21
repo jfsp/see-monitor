@@ -1,0 +1,79 @@
+# SEE-Monitor: Web Service Unit
+# Runs the Flask application under Gunicorn for production use.
+#
+# Installation:
+#   sudo cp systemd/see-monitor-web.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now see-monitor-web
+#
+# Logs:
+#   journalctl -u see-monitor-web -f
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Unit]
+Description=SEE-Monitor Web Service
+Documentation=https://github.com/your-org/see-monitor
+After=network-online.target
+Wants=network-online.target
+PartOf=see-monitor.target
+StartLimitIntervalSec=90
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+User=seemonitor
+Group=seemonitor
+WorkingDirectory=/opt/see-monitor
+
+# ── Environment ──────────────────────────────────────────────────────────────
+# Defaults below are overridden by values in see-monitor.env if set there.
+# systemd does not support bash ${VAR:-default} syntax in ExecStart;
+# declare the defaults here instead.
+EnvironmentFile=/etc/see-monitor/see-monitor.env
+Environment=PYTHONUNBUFFERED=1
+Environment=SEE_BIND=127.0.0.1:5000
+Environment=SEE_WEB_WORKERS=2
+
+# ── Startup ───────────────────────────────────────────────────────────────────
+# Gunicorn listens on 127.0.0.1:5000 by default.
+# Put nginx or caddy in front for TLS termination.
+ExecStart=/opt/see-monitor/.venv/bin/gunicorn \
+    --bind ${SEE_BIND} \
+    --workers ${SEE_WEB_WORKERS} \
+    --worker-class sync \
+    --worker-tmp-dir /tmp \
+    --timeout 120 \
+    --keep-alive 5 \
+    --access-logfile - \
+    --error-logfile - \
+    --capture-output \
+    --forwarded-allow-ips "*" \
+    "app_factory:create_app()"
+
+ExecReload=/bin/kill -HUP $MAINPID
+
+# ── Hardening ─────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/see-monitor /var/log/see-monitor
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# ── Restart policy ────────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=10
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=see-monitor-web
+
+[Install]
+WantedBy=see-monitor.target

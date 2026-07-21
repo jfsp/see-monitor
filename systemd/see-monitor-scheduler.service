@@ -1,0 +1,73 @@
+# SEE-Monitor: Scheduler Service Unit
+# Runs the APScheduler daemon that executes periodic domain scans.
+# This process is deliberately separate from the web service so that
+# a long-running scan does not affect web response times.
+#
+# Installation:
+#   sudo cp systemd/see-monitor-scheduler.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now see-monitor-scheduler
+#
+# Logs:
+#   journalctl -u see-monitor-scheduler -f
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Unit]
+Description=SEE-Monitor Scheduler Service
+Documentation=https://github.com/your-org/see-monitor
+After=network-online.target see-monitor-web.service
+Wants=network-online.target
+# Hard dependency: scheduler is useless without the web service, which
+# owns DB initialisation. If the web service stops, stop the scheduler too.
+Requires=see-monitor-web.service
+PartOf=see-monitor.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+User=seemonitor
+Group=seemonitor
+WorkingDirectory=/opt/see-monitor
+
+# ── Environment ──────────────────────────────────────────────────────────────
+EnvironmentFile=/etc/see-monitor/see-monitor.env
+Environment=PYTHONUNBUFFERED=1
+Environment=SEE_DB_PATH=/var/lib/see-monitor/see_monitor.db
+
+# ── Startup ───────────────────────────────────────────────────────────────────
+# Wait for the web service to create the database before starting.
+# SEE_DB_PATH must match database.path in config.yaml.
+# Timeout and poll interval are positional args; no shell variable expansion
+# occurs in this directive so $waited/$limit do not trigger systemd warnings.
+ExecStartPre=/opt/see-monitor/scripts/wait-for-db.sh $SEE_DB_PATH 60
+
+ExecStart=/opt/see-monitor/.venv/bin/python3 \
+    /opt/see-monitor/see_monitor.py scheduler-daemon
+
+# ── Hardening ─────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/see-monitor /var/log/see-monitor
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Scheduler makes outbound TCP connections for scanning
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
+
+# ── Restart policy ────────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=30
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=see-monitor-scheduler
+
+[Install]
+WantedBy=see-monitor.target
