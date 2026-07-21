@@ -290,6 +290,15 @@ if [[ ${ERRORS} -gt 0 ]]; then
     exit 1
 fi
 
+# ── Normalise permissions (exec bits, CRLF, ownership) ────────────────────────
+# Git pushed from Windows loses the execute bit and can introduce CRLF; re-fix
+# after every sync so ExecStartPre and scripts stay runnable.
+if [[ -f "${DEST_DIR}/scripts/fix-permissions.sh" ]]; then
+    section "Fixing permissions"
+    bash "${DEST_DIR}/scripts/fix-permissions.sh" --prefix "${DEST_DIR}" || \
+        warn "fix-permissions reported an issue (continuing)."
+fi
+
 # ── Restart services (only if their code changed) ─────────────────────────────
 
 if ! $RESTART; then
