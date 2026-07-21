@@ -23,6 +23,7 @@ from scanner.smtp_tls_check import check_starttls
 from scanner.shodan_client import ShodanClient
 from scanner.censys_client import CensysClient
 from scanner.dnsdumpster_client import DNSDumpsterClient
+from scanner.securitytrails_client import SecurityTrailsClient
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ class ScanOrchestrator:
             censys_cfg.get("api_id"), censys_cfg.get("api_secret"))
         self.dnsdumpster = DNSDumpsterClient(
             (cfg.get("dnsdumpster") or {}).get("api_key"))
+        self.securitytrails = SecurityTrailsClient(
+            (cfg.get("securitytrails") or {}).get("api_key"))
 
     # ------------------------------------------------------------------
     def scan_domain(self, domain: str,
@@ -73,12 +76,34 @@ class ScanOrchestrator:
         mx_hosts = [m["host"] for m in mx["mx_hosts"]]
 
         checks["spf"] = self._safe(check_spf, domain, self.dns)
-        passive_selectors = []
+
+        # ---- Passive DKIM-selector discovery (candidates only) -----------
+        passive_selectors: list[str] = []
+        dd_error = st_error = None
+        dd_count = 0
+        st_intel = {"available": self.securitytrails.available, "mx": [],
+                    "selectors": [], "mail_hosts": [], "subdomain_count": 0,
+                    "error": None}
         if self.dnsdumpster.available:
             try:
-                passive_selectors = self.dnsdumpster.discover_selectors(domain)
-            except Exception:
-                logger.debug("DNSDumpster selector discovery failed", exc_info=True)
+                dd = self.dnsdumpster.discover_selectors(domain)
+                dd_count = len(dd)
+                passive_selectors += dd
+            except Exception as exc:
+                dd_error = str(exc)
+        if self.securitytrails.available:
+            try:
+                st_intel = self.securitytrails.gather(domain)
+                st_error = st_intel.get("error")
+                passive_selectors += st_intel.get("selectors", [])
+            except Exception as exc:
+                st_error = str(exc)
+        # de-dup preserving order
+        seen = set()
+        passive_selectors = [s for s in passive_selectors
+                             if not (s in seen or seen.add(s))]
+        checks["intel"] = {"securitytrails": st_intel}
+
         checks["dkim"] = self._safe(
             check_dkim, domain, registered_selectors, self.dns,
             self.dkim_wordlist, passive_selectors)
@@ -104,7 +129,37 @@ class ScanOrchestrator:
                 except Exception:
                     pass
 
-        return {"domain": domain, "scanned_at": started, "checks": checks}
+        # ---- Which external services were used, and what they yielded -----
+        st_hosts = checks.get("starttls", {}).get("hosts", {}) or {}
+        src_counts: dict = {}
+        for v in st_hosts.values():
+            src_counts[v.get("source")] = src_counts.get(v.get("source"), 0) + 1
+        mx_total = checks.get("starttls", {}).get("total", 0)
+        services = {
+            "shodan": {"available": self.shodan.available,
+                       "used": src_counts.get("shodan", 0) > 0,
+                       "mx_covered": src_counts.get("shodan", 0),
+                       "mx_total": mx_total},
+            "censys": {"available": self.censys.available,
+                       "used": src_counts.get("censys", 0) > 0,
+                       "mx_covered": src_counts.get("censys", 0),
+                       "mx_total": mx_total},
+            "active_smtp": {"enabled": self.active_smtp,
+                            "used": src_counts.get("active", 0) > 0,
+                            "mx_covered": src_counts.get("active", 0),
+                            "mx_total": mx_total},
+            "dnsdumpster": {"available": self.dnsdumpster.available,
+                            "selectors": dd_count, "error": dd_error},
+            "securitytrails": {"available": self.securitytrails.available,
+                               "mx": len(st_intel.get("mx", [])),
+                               "selectors": len(st_intel.get("selectors", [])),
+                               "subdomains": st_intel.get("subdomain_count", 0),
+                               "mail_hosts": len(st_intel.get("mail_hosts", [])),
+                               "error": st_error},
+        }
+
+        return {"domain": domain, "scanned_at": started, "checks": checks,
+                "services": services}
 
     @staticmethod
     def _safe(fn, *args) -> dict:
