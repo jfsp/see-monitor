@@ -34,6 +34,13 @@ censys:
 dnsdumpster:
   api_key: ""
 
+# SecurityTrails (optional) — passive-DNS database. Used for DKIM selector
+# discovery (observed '<selector>._domainkey' subdomains) and as a cross-check
+# view of MX / mail-related records. Discovery only; MX and selectors are
+# re-confirmed authoritatively before scoring.
+securitytrails:
+  api_key: ""
+
 # --- Scoring overrides (optional) -----------------------------------------
 # Anything set here overrides guidelines/nist_800_177r1.json.
 # scoring:
