@@ -157,6 +157,46 @@ def test_dkim_confirms_passive_selector():
     assert res["selectors"][0]["source"] == "dnsdumpster"
 
 
+def test_securitytrails_selector_extraction():
+    from scanner.securitytrails_client import (
+        _extract_selectors, SecurityTrailsClient)
+    subs = ["www", "mail", "selector1._domainkey", "s2._domainkey",
+            "autodiscover", "k3._domainkey.mkt"]
+    sels = set(_extract_selectors(subs))
+    assert sels == {"selector1", "s2", "k3"}
+    # No key => safe no-op
+    st = SecurityTrailsClient(None)
+    assert st.available is False
+    g = st.gather("example.com")
+    assert g["available"] is False and g["selectors"] == []
+
+
+def test_cli_scan_renderer():
+    import see_monitor
+    scan = {"domain": "example.com", "scanned_at": "2026-01-01T00:00:00Z",
+            "checks": {"mx": {"has_mx": True, "null_mx": False,
+                              "mx_hosts": [{"host": "mx.example.com",
+                                            "priority": 10}]},
+                       "dmarc": {"record": "v=DMARC1; p=reject"}},
+            "services": {
+                "securitytrails": {"available": True, "mx": 1, "selectors": 3,
+                                   "subdomains": 40, "error": None},
+                "dnsdumpster": {"available": True, "selectors": 2, "error": None},
+                "shodan": {"available": False}, "censys": {"available": False},
+                "active_smtp": {"used": True, "mx_covered": 1, "mx_total": 1}}}
+    a = {"domain": "example.com", "score": 72.0, "rating": "strong",
+         "no_mail": False, "control_scores": {c: 80 for c in see_monitor._CONTROLS},
+         "findings": [{"control": "spf", "severity": "warning", "message": "x"}]}
+    basic = see_monitor._render_scan(scan, a, verbose=False)
+    assert "example.com" in basic
+    assert "SecurityTrails: MX×1, 3 selectors" in basic
+    assert "DNSDumpster: 2 selectors" in basic
+    # debug view adds the DMARC record and the finding line
+    debug = see_monitor._render_scan(scan, a, verbose=True)
+    assert "v=DMARC1; p=reject" in debug
+    assert "detail" in debug
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))
