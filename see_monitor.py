@@ -243,8 +243,11 @@ def _render_sources(svc: dict, indent: str) -> str:
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON only.")
 @click.option("-q", "--quiet", is_flag=True,
               help="One terse line per domain (score + rating).")
+@click.option("-v", "--verbose", "verbose_opt", is_flag=True,
+              help="Debug detail: records, per-MX STARTTLS, findings, "
+                   "service diagnostics.")
 @click.pass_context
-def scan(ctx, domains, list_file, as_json, quiet):
+def scan(ctx, domains, list_file, as_json, quiet, verbose_opt):
     """Scan and assess one or more domains.
 
     Default output is a per-domain summary showing what was found and which
@@ -257,7 +260,10 @@ def scan(ctx, domains, list_file, as_json, quiet):
     from scanner.assessor import assess_domain
 
     cfg = ctx.obj["config"]
-    verbose = ctx.obj.get("verbose", False)
+    # -v works whether given before the subcommand (group level) or after it.
+    verbose = bool(ctx.obj.get("verbose", False) or verbose_opt)
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
     targets = list(domains)
     if list_file:
         with open(list_file, encoding="utf-8") as fh:

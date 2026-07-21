@@ -40,10 +40,12 @@ Environment=SEE_DB_PATH=/var/lib/see-monitor/see_monitor.db
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 # Wait for the web service to create the database before starting.
-# SEE_DB_PATH must match database.path in config.yaml.
-# Timeout and poll interval are positional args; no shell variable expansion
-# occurs in this directive so $waited/$limit do not trigger systemd warnings.
-ExecStartPre=/opt/see-monitor/scripts/wait-for-db.sh $SEE_DB_PATH 60
+# SEE_DB_PATH must match db_path in config.yaml. It is set via Environment=
+# above, so systemd expands ${SEE_DB_PATH} here at exec time (the raw directive
+# shown by `systemctl status` is NOT the expanded form).
+# The script is run through /bin/bash so it does not need its own execute bit —
+# this avoids 203/EXEC if packaging (zip/cp) drops the file's +x permission.
+ExecStartPre=/bin/bash /opt/see-monitor/scripts/wait-for-db.sh ${SEE_DB_PATH} 60
 
 ExecStart=/opt/see-monitor/.venv/bin/python3 \
     /opt/see-monitor/see_monitor.py scheduler-daemon

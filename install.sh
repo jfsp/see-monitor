@@ -230,6 +230,12 @@ else
   # Re-assert service-writable paths that live under the prefix (none by
   # default) and protect the tree from other users.
   run chmod -R o-rwx "${PREFIX}"
+  # Packaging (zip/cp) can drop execute bits; re-assert them on shipped
+  # scripts so ExecStartPre and scripts/deploy.sh can run directly.
+  if [[ -d "${PREFIX}/scripts" ]]; then
+    run bash -c "chmod 0750 '${PREFIX}'/scripts/*.sh '${PREFIX}'/scripts/*.py 2>/dev/null || true"
+  fi
+  [[ -f "${PREFIX}/install.sh" ]] && run chmod 0750 "${PREFIX}/install.sh"
   ok "Application code installed"
 fi
 echo
