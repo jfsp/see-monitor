@@ -93,6 +93,42 @@ python see_monitor.py serve --host 127.0.0.1 --port 8080
 Default admin credentials on first run are `admin` / `changeme123` —
 **change these immediately**.
 
+### Deploying updates (git pull) and file permissions
+
+If you update the server by pulling from Git (especially when pushing from
+Windows), two Unix-specific things do not survive by default and will break the
+services:
+
+- **Execute bits.** Git records only `100644` vs `100755`, and Windows has no
+  Unix execute bit, so scripts arrive non-executable and `ExecStartPre`
+  (`wait-for-db.sh`) fails with `203/EXEC`. Mark them executable in the index
+  once, then commit — after that every pull restores `+x`:
+
+  ```
+  git update-index --chmod=+x install.sh scripts/*.sh scripts/reassess_all.py \
+      see_monitor.py
+  git commit -m "Mark scripts executable"
+  ```
+
+- **Line endings.** Shell scripts saved with CRLF fail with
+  `bad interpreter: /bin/bash^M`. The shipped `.gitattributes` forces `LF` on
+  checkout to prevent this.
+
+As a **fallback that runs regardless of how the tree arrived**, normalise
+permissions after every deployment:
+
+```
+sudo bash scripts/fix-permissions.sh            # exec bits, CRLF, ownership, modes
+sudo bash scripts/fix-permissions.sh --dry-run  # preview only
+```
+
+`fix-permissions.sh` is idempotent and non-destructive: directories → `0750`,
+files → `0640`, executables (`*.sh`, entry points) → `0750`, CRLF stripped from
+shell scripts, tree re-owned `root:seemonitor` — while never touching the
+database, the virtualenv binaries, `.git`, or file *content* (apart from CRLF
+stripping). Both `install.sh` and `scripts/deploy.sh` call it automatically; the
+standalone form is for the `git pull` workflow.
+
 ### Production
 
 Run under Gunicorn behind nginx (TLS termination). Install the systemd units:
