@@ -1,13 +1,14 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.6.1 · **Status:** functional, all tests passing (63) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.6.2 · **Status:** functional, all tests passing (74) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 > Final handover for this session. Recent additions are summarised in
 > `CHANGELOG.md` (0.3.0 profiles → 0.4.0 status dashboards + trends → 0.5.0 PDF
 > export → 0.5.1 DB consistency checker + schema doc → **0.6.0 assessment
 > depth: evidence model, certificate/DANE verification, DNS hygiene,
 > reputation, subdomain coverage, sub-scores** → **0.6.1 scheduler coverage:
-> multi-profile scheduled runs, schedule audit tool, `--rescan-all`**).
+> multi-profile scheduled runs, schedule audit tool, `--rescan-all`** →
+> **0.6.2 bulk organisation import**).
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -47,12 +48,12 @@ shows all profiles (`--profile` to limit).
 
 - **Working source (ephemeral):** `/home/claude/see/see-monitor` — resets
   between sessions. Do not rely on it persisting.
-- **Deliverable (persistent):** `see-monitor-0.6.1.zip` in the outputs area.
+- **Deliverable (persistent):** `see-monitor-0.6.2.zip` in the outputs area.
   **Start a new session by extracting this zip.**
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
 
-Run tests: `python3 -m pytest tests/test_smoke.py -q` (63 passing).
+Run tests: `python3 -m pytest tests/test_smoke.py -q` (74 passing).
 DB audit:  `python3 scripts/db_check.py --db data/see_monitor.db` (read-only).
 Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycache__*")`.
 
@@ -119,6 +120,8 @@ scheduler/
 Ops: `install.sh`, `scripts/{deploy,sync-tree,wait-for-db,fix-permissions}.sh`,
 `scripts/reassess_all.py`, `scripts/db_check.py` (read-only consistency audit),
 `scripts/schedule_audit.py` (schedule coverage audit / `--create-weekly`),
+`scripts/import_orgs.py` (CSV bulk import: organisations, domains, community,
+scan + dated log),
 `systemd/{web,scheduler,target,nginx,env}`,
 `.gitattributes`, `config/config.yaml.example`, `tests/test_smoke.py`.
 
@@ -196,7 +199,12 @@ Ops: `install.sh`, `scripts/{deploy,sync-tree,wait-for-db,fix-permissions}.sh`,
    live job (`_job_changed`) and skips unchanged ones — otherwise a 168h
    schedule reset every 60 minutes would never fire. This is subtle and easy to
    reintroduce.
-17. **`scripts/db_check.py` is read-only** (opens the DB `mode=ro`); it must
+17. **Imports never unassign.** `scripts/import_orgs.py` uses
+   `set_org_domains(..., replace=False)` and `INSERT OR IGNORE` throughout, so
+   an import file that omits a domain must never remove it. Operators re-run
+   these files with partial lists; a destructive import would silently drop
+   organisation membership that was set elsewhere (web UI, earlier import).
+18. **`scripts/db_check.py` is read-only** (opens the DB `mode=ro`); it must
    never mutate data. When the schema changes, update BOTH `SCHEMA_VERSION`
    (+ migration) AND `docs/DATABASE.md`, and extend `db_check.py` if new
    references/invariants are introduced.
@@ -242,7 +250,7 @@ detail + per-service diagnostics (works before *or* after the subcommand);
   and can introduce CRLF. Mitigations shipped: `.gitattributes` (LF), and
   `scripts/fix-permissions.sh` (idempotent, non-destructive) called automatically
   by `install.sh` and `deploy.sh`. One-time in the repo:
-  `git update-index --chmod=+x install.sh scripts/*.sh scripts/reassess_all.py see_monitor.py`.
+  `git update-index --chmod=+x install.sh scripts/*.sh scripts/*.py see_monitor.py`.
 - **install.sh** is a first-run installer: instance state written only if absent;
   code replaced only with `--upgrade` (backed up); units backed up before
   replacement; `--dry-run` supported.
@@ -329,13 +337,14 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 ## 9. Version & changelog convention
 
 - Version is single-sourced from the `VERSION` file (read by `version.py`).
-  Now at **0.6.1**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
+  Now at **0.6.2**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
   profiles) → 0.4.0 (status dashboards + trends) → 0.5.0 (PDF export) →
   0.5.1 (DB consistency checker + schema doc) → 0.6.0 (assessment depth:
   evidence model, certificate/DANE verification, DNS hygiene, reputation,
   subdomain coverage, sub-scores) → 0.6.1 (scheduler coverage: multi-profile
   scheduled runs, schedule audit + `--create-weekly`, `scan --rescan-all`,
-  post-run DB health gate). Full detail in `CHANGELOG.md`.
+  post-run DB health gate) → 0.6.2 (bulk organisation import from CSV).
+  Full detail in `CHANGELOG.md`.
 - **Convention going forward:** every change ships with a Conventional-Commits
   changelog. The 0.1.0→0.2.0 commits are listed in the session notes; seed
   `CHANGELOG.md` from them when created. Commit trailer used:
@@ -345,8 +354,8 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 
 ## 10. First steps in the next session
 
-1. Extract `see-monitor-0.6.1.zip`; run `pytest tests/test_smoke.py -q`
-   (expect 63 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
+1. Extract `see-monitor-0.6.2.zip`; run `pytest tests/test_smoke.py -q`
+   (expect 74 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
    clean base (the v2→v3 migration is applied on first `Database()` open).
 2. Pick from §8. Cheapest high-value items remain `SESSION_COOKIE_NAME` (§6)
    and the passive-key env/config gap (§5).

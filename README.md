@@ -84,6 +84,35 @@ Two domains can share a rating while differing sharply here: a "partial" domain
 with `impersonation` 90 and `resilience` 30 needs completely different work
 from its mirror image.
 
+### Bulk import of organisations
+
+`scripts/import_orgs.py` takes a CSV of `domain,organisation,country[,sector]`
+and registers, groups, scans and logs in one pass:
+
+```csv
+# EU financial supervisors
+domain,organisation,country
+oenb.at,Oesterreichische Nationalbank,Austria
+fma.gv.at,Finanzmarktaufsicht,Austria
+nbb.be,National Bank of Belgium,Belgium
+eestipank.ee,Eesti Pank,Estonia
+```
+
+```bash
+python3 scripts/import_orgs.py banks.csv --community "EU Central Banks" --schedule
+python3 scripts/import_orgs.py banks.csv --dry-run     # show the plan, write nothing
+```
+
+Country codes and regions are inferred from the ccTLD (`data/tld_geo.csv`),
+with the CSV's country name kept as the display label. Several rows may share
+an organisation name — their domains are merged. Results go to
+`logs/see-monitor-import-YYYY-MM-DD.log`, one line per domain with the score,
+rating and evidence confidence for every profile.
+
+The import is idempotent: organisations match by name, and a domain already
+assigned is never removed by a file that omits it, so re-running after adding
+rows imports only the new material.
+
 ### Keeping scans current
 
 The scheduler executes rows in `scheduled_scans`, each bound to exactly one

@@ -4,6 +4,58 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.6.2] — 2026-07-24
+
+### Added
+- **Bulk organisation import** — `scripts/import_orgs.py`. Takes a CSV of
+  `domain,organisation,country[,sector]` and in one pass registers the
+  organisations, assigns their domains, optionally attaches them all to a named
+  community, scans every domain, and writes a dated log.
+
+  ```bash
+  python3 scripts/import_orgs.py banks.csv --community "EU Central Banks"
+  python3 scripts/import_orgs.py banks.csv --dry-run
+  python3 scripts/import_orgs.py banks.csv --no-scan --schedule
+  ```
+
+  - **Parsing** uses the `csv` module, so organisation names containing commas
+    work when quoted. Blank lines, `#` comments and a `domain,...` header are
+    ignored — the header is detected on the first data row, not line 1, because
+    comment blocks above it are common. Invalid rows are reported individually
+    and skipped rather than aborting the run.
+  - **Multiple domains per organisation** are merged into one organisation.
+    Conflicting countries for the same organisation are reported, first value
+    wins.
+  - **Geography** is resolved per organisation: the ccTLD decides
+    `country_code` and `region` via `data/tld_geo.csv`, while the CSV's country
+    name is kept as the display label. A gTLD-only organisation still resolves
+    its code by matching the supplied country name against the same table.
+    Existing organisations imported without geography are backfilled.
+  - **Idempotent.** Organisations match by name (case-insensitive), domain
+    assignments and community membership use `INSERT OR IGNORE`, and
+    `set_org_domains(..., replace=False)` means a domain already assigned is
+    never removed by an import file that omits it. Re-running imports only new
+    material; the log marks each domain `+` (added) or `=` (already present).
+  - **Dated log** at `logs/see-monitor-import-YYYY-MM-DD.log` (append mode with
+    a session header; `--log-dir` / `--log-file` to override). Contains the
+    per-organisation plan, per-domain scan results with score, rating and
+    evidence confidence for every profile, and a timing summary.
+  - **`--schedule`** refreshes the auto-managed weekly schedule afterwards, so
+    imported domains are actually rescanned rather than assessed once.
+  - `--dry-run`, `--no-scan`, `--scan-only`, `--profile`, `--db`, `--config`.
+  - Exit codes: 0 clean, 1 completed with errors (bad rows or failed scans),
+    2 fatal (input or database unreadable).
+- 11 new tests (74 total): parsing edge cases, quoted names, domain merging,
+  country conflicts, ccTLD and country-name geography resolution, community
+  creation, idempotent re-runs, the no-unassign guarantee, dry-run writing
+  nothing, geography backfill, and an end-to-end run asserting the dated log.
+
+### Note on ordering
+Registration runs **before** scanning. Scanning a large list takes minutes to
+hours, and an interruption partway through would otherwise lose the entire
+import; registration is fast and idempotent, so an interrupted run can simply
+be repeated. Use `--scan-only` to rescan a file that is already imported.
+
 ## [0.6.1] — 2026-07-24
 
 Operational release. 0.6.0 added the checks; this makes sure they actually

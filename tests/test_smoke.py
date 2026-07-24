@@ -1291,3 +1291,198 @@ def test_scan_without_targets_mentions_rescan_all(monkeypatch):
         res = CliRunner().invoke(see_monitor.cli, ["scan"])
         assert res.exit_code != 0
         assert "--rescan-all" in res.output
+
+
+# ======================================================================
+# v0.6.2 — bulk organisation import
+# ======================================================================
+
+_IMPORT_CSV = """\
+# EU financial supervisors
+domain,organisation,country
+oenb.at,Oesterreichische Nationalbank,Austria
+fma.gv.at,Finanzmarktaufsicht,Austria
+nbb.be,National Bank of Belgium,Belgium
+
+eestipank.ee,Eesti Pank,Estonia
+fi.ee,Finantsinspektsioon,Estonia
+"""
+
+
+def test_import_parses_comments_header_and_blank_lines():
+    from scripts.import_orgs import parse_rows
+    rows, errors = parse_rows(_IMPORT_CSV)
+    assert errors == []
+    assert len(rows) == 5
+    assert rows[0]["domain"] == "oenb.at"
+    assert rows[0]["organisation"] == "Oesterreichische Nationalbank"
+    assert rows[0]["country"] == "Austria"
+
+
+def test_import_handles_quoted_names_and_rejects_bad_rows():
+    from scripts.import_orgs import parse_rows
+    rows, errors = parse_rows(
+        '"example.be","Bank, National",Belgium\n'
+        'not a domain,Org,Country\n'
+        'lonely.example\n'
+        'x.example,,Country\n')
+    assert len(rows) == 1
+    assert rows[0]["organisation"] == "Bank, National"
+    assert len(errors) == 3
+    assert any("not a valid domain" in e for e in errors)
+    assert any("at least" in e for e in errors)
+    assert any("organisation name is empty" in e for e in errors)
+
+
+def test_import_merges_multiple_domains_per_organisation():
+    from scripts.import_orgs import parse_rows, group_by_org
+    rows, _ = parse_rows(
+        "a.example,Same Org,Austria\n"
+        "b.example,Same Org,Austria\n"
+        "c.example,Other Org,Belgium\n")
+    groups = group_by_org(rows)
+    assert set(groups) == {"Same Org", "Other Org"}
+    assert groups["Same Org"]["domains"] == ["a.example", "b.example"]
+
+
+def test_import_flags_conflicting_country_for_one_organisation():
+    from scripts.import_orgs import parse_rows, group_by_org
+    rows, _ = parse_rows("a.example,Org,Austria\nb.example,Org,Belgium\n")
+    groups = group_by_org(rows)
+    assert groups["Org"]["country"] == "Austria"        # first wins
+    assert any("conflicts with" in c for c in groups["Org"]["conflicts"])
+
+
+def test_import_infers_country_code_from_cctld():
+    from scripts.import_orgs import resolve_geo, _country_name_index
+    idx = _country_name_index()
+    code, country, region = resolve_geo(["oenb.at"], "Austria", idx)
+    assert code == "AT"
+    assert country == "Austria"          # operator label is preserved
+    # A gTLD gives no ccTLD signal; the country name must still resolve.
+    code2, _, _ = resolve_geo(["example.com"], "Austria", idx)
+    assert code2 == "AT"
+
+
+def test_import_creates_orgs_domains_and_community():
+    from scripts.import_orgs import (parse_rows, group_by_org, plan_import,
+                                     apply_import)
+    with tempfile.TemporaryDirectory() as tmp:
+        from data.database import Database
+        db = Database(os.path.join(tmp, "imp.db"))
+        rows, _ = parse_rows(_IMPORT_CSV)
+        plan = plan_import(db, group_by_org(rows), "EU Central Banks")
+        summary = apply_import(db, plan)
+
+        assert summary["created"] == 5 and summary["reused"] == 0
+        assert summary["domains_assigned"] == 5
+        assert summary["community_action"] == "created"
+
+        orgs = {o["name"]: o for o in db.get_organisations()}
+        assert len(orgs) == 5
+        assert orgs["Eesti Pank"]["country_code"] == "EE"
+        assert db.get_org_domains(orgs["Eesti Pank"]["id"]) == ["eestipank.ee"]
+
+        community = db.get_communities()[0]
+        assert len(db.get_community_orgs(community["id"])) == 5
+        assert len(db.get_community_domains(community["id"])) == 5
+
+
+def test_import_is_idempotent_and_adds_only_new_domains():
+    from scripts.import_orgs import (parse_rows, group_by_org, plan_import,
+                                     apply_import)
+    with tempfile.TemporaryDirectory() as tmp:
+        from data.database import Database
+        db = Database(os.path.join(tmp, "imp.db"))
+        rows, _ = parse_rows(_IMPORT_CSV)
+        apply_import(db, plan_import(db, group_by_org(rows), "EU"))
+
+        # Re-run unchanged: nothing new
+        again = apply_import(db, plan_import(db, group_by_org(rows), "EU"))
+        assert again["created"] == 0 and again["reused"] == 5
+        assert again["domains_assigned"] == 0
+        assert again["community_action"] == "reused"
+        assert len(db.get_organisations()) == 5
+        assert len(db.get_communities()) == 1
+
+        # Re-run with an extra domain for an existing organisation
+        rows2, _ = parse_rows(
+            _IMPORT_CSV + "statistik.oenb.at,Oesterreichische Nationalbank,Austria\n")
+        plan = plan_import(db, group_by_org(rows2), "EU")
+        third = apply_import(db, plan)
+        assert third["created"] == 0
+        assert third["domains_assigned"] == 1
+        org = next(o for o in db.get_organisations()
+                   if o["name"] == "Oesterreichische Nationalbank")
+        assert set(db.get_org_domains(org["id"])) == {
+            "oenb.at", "statistik.oenb.at"}
+
+
+def test_import_never_removes_existing_domain_assignments():
+    """An import file that omits a domain must not unassign it."""
+    from scripts.import_orgs import (parse_rows, group_by_org, plan_import,
+                                     apply_import)
+    with tempfile.TemporaryDirectory() as tmp:
+        from data.database import Database
+        db = Database(os.path.join(tmp, "imp.db"))
+        org_id = db.create_organisation(name="Eesti Pank", country_code="EE")
+        db.set_org_domains(org_id, ["legacy.example"])
+
+        rows, _ = parse_rows("eestipank.ee,Eesti Pank,Estonia\n")
+        apply_import(db, plan_import(db, group_by_org(rows)))
+        assert set(db.get_org_domains(org_id)) == {
+            "legacy.example", "eestipank.ee"}
+
+
+def test_import_dry_run_writes_nothing():
+    from scripts.import_orgs import (parse_rows, group_by_org, plan_import,
+                                     apply_import)
+    with tempfile.TemporaryDirectory() as tmp:
+        from data.database import Database
+        db = Database(os.path.join(tmp, "imp.db"))
+        rows, _ = parse_rows(_IMPORT_CSV)
+        summary = apply_import(db, plan_import(db, group_by_org(rows), "EU"),
+                               dry_run=True)
+        assert summary["created"] == 5
+        assert db.get_organisations() == []
+        assert db.get_communities() == []
+
+
+def test_import_backfills_geography_on_existing_organisation():
+    from scripts.import_orgs import (parse_rows, group_by_org, plan_import,
+                                     apply_import)
+    with tempfile.TemporaryDirectory() as tmp:
+        from data.database import Database
+        db = Database(os.path.join(tmp, "imp.db"))
+        org_id = db.create_organisation(name="Eesti Pank")   # no geography
+        rows, _ = parse_rows("eestipank.ee,Eesti Pank,Estonia\n")
+        apply_import(db, plan_import(db, group_by_org(rows)))
+        org = db.get_organisation(org_id)
+        assert org["country_code"] == "EE"
+        assert org["country"] == "Estonia"
+
+
+def test_import_end_to_end_writes_dated_log(monkeypatch):
+    """The CLI path must produce a dated log without scanning."""
+    import scripts.import_orgs as importer
+    with tempfile.TemporaryDirectory() as tmp:
+        csv_path = os.path.join(tmp, "orgs.csv")
+        with open(csv_path, "w", encoding="utf-8") as fh:
+            fh.write(_IMPORT_CSV)
+        log_dir = os.path.join(tmp, "logs")
+        monkeypatch.setattr(sys, "argv", [
+            "import_orgs.py", csv_path,
+            "--db", os.path.join(tmp, "imp.db"),
+            "--config", os.path.join(tmp, "missing.yaml"),
+            "--log-dir", log_dir, "--community", "EU", "--no-scan"])
+        assert importer.main() == 0
+
+        from datetime import datetime, timezone
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        log_path = os.path.join(log_dir, f"see-monitor-import-{stamp}.log")
+        assert os.path.exists(log_path)
+        text = open(log_path, encoding="utf-8").read()
+        assert "SEE-Monitor bulk import" in text
+        assert "Oesterreichische Nationalbank" in text
+        assert "community 'EU' created" in text
+        assert "[scan] skipped" in text
