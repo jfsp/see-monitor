@@ -29,7 +29,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "data/see_monitor.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # Assessments are now stored per (domain, guideline); this is the guideline
 # used when a caller does not specify one, preserving pre-v2 behaviour.
 DEFAULT_GUIDELINE_ID = "nist_800_177r1"
@@ -257,6 +257,35 @@ class Database:
                 if column not in existing:
                     conn.execute(ddl)
 
+            # v3 -> v4 migration: enforce one assessment per
+            # (domain, guideline, assessed_at).
+            #
+            # reassess_all.py re-scores a stored scan and correctly reuses that
+            # scan's timestamp, so before v4 every re-assessment INSERTed a
+            # second row identical in those three columns. get_latest_assessments
+            # joins on MAX(assessed_at), and a tie returns *both* rows, so each
+            # reassess run visibly doubled every domain in the dashboards.
+            #
+            # Deduplicate keeping the highest id (the most recently written row,
+            # i.e. the one scored by the newest code), then add the UNIQUE index
+            # that makes the upsert in save_assessment possible.
+            has_unique = any(
+                r["name"] == "idx_assess_unique"
+                for r in conn.execute("PRAGMA index_list(assessments)"))
+            if not has_unique:
+                removed = conn.execute(
+                    "DELETE FROM assessments WHERE id NOT IN ("
+                    "  SELECT MAX(id) FROM assessments "
+                    "  GROUP BY domain, guideline, assessed_at)").rowcount
+                if removed:
+                    logger.warning(
+                        "Schema v4: removed %d duplicate assessment row(s) "
+                        "(same domain/guideline/timestamp); kept the most "
+                        "recently written of each", removed)
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_assess_unique "
+                    "ON assessments(domain, guideline, assessed_at)")
+
             if current is None or current < SCHEMA_VERSION:
                 conn.execute(
                     "INSERT INTO schema_version (version, applied_at) "
@@ -317,12 +346,30 @@ class Database:
         return out
 
     def save_assessment(self, run_id: str, a: dict):
+        """
+        Store an assessment, replacing any existing one for the same
+        (domain, guideline, assessed_at).
+
+        Re-scoring a stored scan legitimately produces the same timestamp as the
+        original assessment — it describes the same measurement, just scored by
+        newer code — so this is an UPSERT rather than an INSERT. That makes
+        scripts/reassess_all.py idempotent: running it repeatedly updates rows
+        in place instead of multiplying them.
+        """
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO assessments (run_id, domain, assessed_at, "
                 "guideline, score, rating, no_mail, controls_json, "
                 "findings_json, subscores_json, confidence, "
-                "confidence_notes_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "confidence_notes_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(domain, guideline, assessed_at) DO UPDATE SET "
+                "  run_id=excluded.run_id, score=excluded.score, "
+                "  rating=excluded.rating, no_mail=excluded.no_mail, "
+                "  controls_json=excluded.controls_json, "
+                "  findings_json=excluded.findings_json, "
+                "  subscores_json=excluded.subscores_json, "
+                "  confidence=excluded.confidence, "
+                "  confidence_notes_json=excluded.confidence_notes_json",
                 (run_id, a["domain"], a["assessed_at"], a["guideline"],
                  a["score"], a["rating"], 1 if a.get("no_mail") else 0,
                  json.dumps(a["control_scores"]),
@@ -359,18 +406,26 @@ class Database:
         profiles (used for exports); otherwise it is filtered to that profile.
         """
         if guideline is None:
+            # The id tie-break keeps this correct even against a database
+            # that predates the v4 unique index (e.g. opened read-only).
             sql = ("SELECT a.* FROM assessments a JOIN ("
                    "  SELECT domain, guideline, MAX(assessed_at) AS ts "
                    "  FROM assessments GROUP BY domain, guideline) m "
                    "ON a.domain=m.domain AND a.guideline=m.guideline "
-                   "AND a.assessed_at=m.ts")
+                   "AND a.assessed_at=m.ts "
+                   "WHERE a.id=(SELECT MAX(x.id) FROM assessments x "
+                   "  WHERE x.domain=a.domain AND x.guideline=a.guideline "
+                   "  AND x.assessed_at=a.assessed_at)")
             params: tuple = ()
         else:
             sql = ("SELECT a.* FROM assessments a JOIN ("
                    "  SELECT domain, MAX(assessed_at) AS ts FROM assessments "
                    "  WHERE guideline=? GROUP BY domain) m "
                    "ON a.domain=m.domain AND a.assessed_at=m.ts "
-                   "WHERE a.guideline=?")
+                   "WHERE a.guideline=? "
+                   "AND a.id=(SELECT MAX(x.id) FROM assessments x "
+                   "  WHERE x.domain=a.domain AND x.guideline=a.guideline "
+                   "  AND x.assessed_at=a.assessed_at)")
             params = (guideline, guideline)
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()

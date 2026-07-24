@@ -1,6 +1,6 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.6.3 · **Status:** functional, all tests passing (84) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.6.4 · **Status:** functional, all tests passing (92) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 > Final handover for this session. Recent additions are summarised in
 > `CHANGELOG.md` (0.3.0 profiles → 0.4.0 status dashboards + trends → 0.5.0 PDF
@@ -9,7 +9,8 @@
 > reputation, subdomain coverage, sub-scores** → **0.6.1 scheduler coverage:
 > multi-profile scheduled runs, schedule audit tool, `--rescan-all`** →
 > **0.6.2 bulk organisation import** → **0.6.3 no-mail domains: N/A rating,
-> scan-time skip (`--force`), `prune_no_mail.py` cleanup**).
+> scan-time skip (`--force`), `prune_no_mail.py` cleanup** → **0.6.4 fix:
+> duplicate assessments after re-assessment; schema v4 uniqueness**).
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -49,12 +50,12 @@ shows all profiles (`--profile` to limit).
 
 - **Working source (ephemeral):** `/home/claude/see/see-monitor` — resets
   between sessions. Do not rely on it persisting.
-- **Deliverable (persistent):** `see-monitor-0.6.3.zip` in the outputs area.
+- **Deliverable (persistent):** `see-monitor-0.6.4.zip` in the outputs area.
   **Start a new session by extracting this zip.**
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
 
-Run tests: `python3 -m pytest tests/test_smoke.py -q` (84 passing).
+Run tests: `python3 -m pytest tests/test_smoke.py -q` (92 passing).
 DB audit:  `python3 scripts/db_check.py --db data/see_monitor.db` (read-only).
 Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycache__*")`.
 
@@ -102,7 +103,7 @@ scanner/
                         (guideline_id), required_signals gating,
                         assess_all_profiles; sub-scores + confidence
 data/
-  database.py           SQLite schema v3 + full data-access API; get_timeline()
+  database.py           SQLite schema v4 + full data-access API; get_timeline()
 docs/DATABASE.md        authoritative schema reference (KEEP CURRENT on changes)
   geo_inference.py, tld_geo.csv   country tagging (reused)
 roadmap/generator.py    per-domain + group roadmaps
@@ -223,7 +224,18 @@ scan + dated log), `scripts/prune_no_mail.py` (remove no-mail/empty domains),
    with zero positive EMAIL signal (infrastructure controls ignored), so a
    parked domain publishing SPF -all is preserved. The script refuses to write
    without --yes or --dry-run.
-21. **`scripts/db_check.py` is read-only** (opens the DB `mode=ro`); it must
+21. **One assessment per (domain, guideline, assessed_at).** Enforced by the v4
+   UNIQUE index; `save_assessment` UPSERTs. Re-scoring reuses the scan's
+   timestamp on purpose (a new one would fabricate a trend point), so INSERT
+   semantics duplicate rows and `get_latest_assessments`, joining on
+   `MAX(assessed_at)`, returns every tied row — this is exactly the 0.6.4 bug.
+   Never revert the UPSERT to a plain INSERT, and never give a re-assessment a
+   fresh timestamp to dodge the constraint.
+22. **`db_check.py` uses plain tuples.** It connects without
+   `row_factory=sqlite3.Row` (deliberately: it must work on damaged databases),
+   so PRAGMA and SELECT rows are indexed positionally. `row["name"]` raises
+   TypeError there, while the same expression is correct in `database.py`.
+23. **`scripts/db_check.py` is read-only** (opens the DB `mode=ro`); it must
    never mutate data. When the schema changes, update BOTH `SCHEMA_VERSION`
    (+ migration) AND `docs/DATABASE.md`, and extend `db_check.py` if new
    references/invariants are introduced.
@@ -356,7 +368,7 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 ## 9. Version & changelog convention
 
 - Version is single-sourced from the `VERSION` file (read by `version.py`).
-  Now at **0.6.3**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
+  Now at **0.6.4**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
   profiles) → 0.4.0 (status dashboards + trends) → 0.5.0 (PDF export) →
   0.5.1 (DB consistency checker + schema doc) → 0.6.0 (assessment depth:
   evidence model, certificate/DANE verification, DNS hygiene, reputation,
@@ -364,7 +376,8 @@ detail + per-service diagnostics (works before *or* after the subcommand);
   scheduled runs, schedule audit + `--create-weekly`, `scan --rescan-all`,
   post-run DB health gate) → 0.6.2 (bulk organisation import from CSV).
   → 0.6.3 (no-mail domains rated N/A, skipped on scan unless --force,
-  prune_no_mail.py cleanup). Full detail in `CHANGELOG.md`.
+  prune_no_mail.py cleanup) → 0.6.4 (fix: duplicate assessments; schema v4).
+  Full detail in `CHANGELOG.md`.
 - **Convention going forward:** every change ships with a Conventional-Commits
   changelog. The 0.1.0→0.2.0 commits are listed in the session notes; seed
   `CHANGELOG.md` from them when created. Commit trailer used:
@@ -374,8 +387,8 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 
 ## 10. First steps in the next session
 
-1. Extract `see-monitor-0.6.3.zip`; run `pytest tests/test_smoke.py -q`
-   (expect 84 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
+1. Extract `see-monitor-0.6.4.zip`; run `pytest tests/test_smoke.py -q`
+   (expect 92 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
    clean base (the v2→v3 migration is applied on first `Database()` open).
 2. Pick from §8. Cheapest high-value items remain `SESSION_COOKIE_NAME` (§6)
    and the passive-key env/config gap (§5).

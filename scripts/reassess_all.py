@@ -3,7 +3,15 @@
 SEE-Monitor: Re-assess all domains
 Re-runs the scoring engine over the most recent raw scan of every domain,
 without re-querying DNS. Use this after changing scoring weights or rating
-bands in guidelines/nist_800_177r1.json or config.yaml.
+bands in guidelines/*.json or config.yaml.
+
+The re-assessment deliberately reuses the original scan's timestamp: it
+describes the same measurement, just scored by newer code, so inventing a new
+timestamp would plant a fake point on every trend chart. Storage is an UPSERT
+keyed on (domain, guideline, assessed_at), which makes this script idempotent —
+running it repeatedly updates rows in place rather than multiplying them.
+(Before schema v4 it inserted duplicates; opening the database with a current
+build deduplicates automatically.)
 
 Usage:  python scripts/reassess_all.py [--config config/config.yaml]
 
@@ -42,9 +50,11 @@ def main():
     domains = db.get_all_known_domains()
     run_id = db.create_run(domains, trigger="reassess")
     n = 0
+    skipped = []
     for domain in domains:
         scans = db.get_domain_scans(domain, limit=1)
         if not scans:
+            skipped.append(domain)
             continue
         scan = {"domain": domain,
                 "scanned_at": scans[0]["scanned_at"],
@@ -54,7 +64,14 @@ def main():
         db.bump_run_progress(run_id)
         n += 1
     db.finish_run(run_id)
+    with db._connect() as conn:
+        total = conn.execute("SELECT COUNT(*) c FROM assessments").fetchone()["c"]
     print(f"Re-assessed {n} domain(s) x {len(gids)} profile(s) into run {run_id}.")
+    print(f"assessments table now holds {total} row(s) "
+          f"(rows are updated in place, not appended).")
+    if skipped:
+        print(f"Skipped {len(skipped)} domain(s) with no stored raw scan: "
+              + ", ".join(skipped[:10]))
 
 
 if __name__ == "__main__":

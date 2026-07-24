@@ -938,7 +938,7 @@ def test_subscores_and_confidence_are_computed():
 def test_schema_v3_persists_subscores_and_confidence():
     from data.database import Database, SCHEMA_VERSION
     from scanner.assessor import assess_domain
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
     with tempfile.TemporaryDirectory() as tmp:
         db = Database(os.path.join(tmp, "v3.db"))
         run = db.create_run(["example.com"])
@@ -1732,3 +1732,196 @@ def test_prune_script_refuses_without_yes_or_dry_run(monkeypatch, capsys):
             "--config", os.path.join(tmp, "missing.yaml")])
         prune.main()
         assert "void.example" in db.get_all_known_domains()   # not deleted
+
+
+# ======================================================================
+# v0.6.4 — duplicate assessments (regression)
+# ======================================================================
+
+def _legacy_v3_db(path, rows):
+    """Build a pre-v4 database (no UNIQUE index) holding the given rows."""
+    import sqlite3
+    import json as _json
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE schema_version (version INTEGER NOT NULL,
+                                     applied_at TEXT NOT NULL);
+        CREATE TABLE scan_runs (id TEXT PRIMARY KEY, started_at TEXT,
+            finished_at TEXT, status TEXT, trigger TEXT,
+            domains_total INTEGER, domains_done INTEGER);
+        CREATE TABLE assessments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT,
+            domain TEXT NOT NULL, assessed_at TEXT NOT NULL,
+            guideline TEXT NOT NULL, score REAL NOT NULL, rating TEXT NOT NULL,
+            no_mail INTEGER NOT NULL DEFAULT 0, controls_json TEXT NOT NULL,
+            findings_json TEXT NOT NULL,
+            subscores_json TEXT NOT NULL DEFAULT '{}',
+            confidence TEXT NOT NULL DEFAULT 'high',
+            confidence_notes_json TEXT NOT NULL DEFAULT '[]');
+    """)
+    conn.execute("INSERT INTO schema_version VALUES (3,'2026-01-01')")
+    for run_id, domain, ts, guideline, score, rating in rows:
+        conn.execute(
+            "INSERT INTO assessments (run_id, domain, assessed_at, guideline,"
+            " score, rating, controls_json, findings_json) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (run_id, domain, ts, guideline, score, rating,
+             _json.dumps({"spf": 100}), _json.dumps([])))
+    conn.commit()
+    conn.close()
+
+
+def test_reassess_no_longer_duplicates_rows():
+    """Regression: reassess_all reuses the scan timestamp; storing must upsert."""
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(os.path.join(tmp, "s.db"))
+        run = db.create_run(["example.com"])
+        a = assess_domain(_strong_scan())
+
+        db.save_assessment(run, a)
+        db.save_assessment(db.create_run(["example.com"]), a)   # "reassess"
+        db.save_assessment(db.create_run(["example.com"]), a)   # and again
+
+        with db._connect() as conn:
+            n = conn.execute("SELECT COUNT(*) c FROM assessments").fetchone()["c"]
+        assert n == 1
+        assert len(db.get_latest_assessments(guideline="nist_800_177r1")) == 1
+
+
+def test_upsert_updates_the_row_in_place():
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(os.path.join(tmp, "s.db"))
+        run = db.create_run(["example.com"])
+        a = assess_domain(_strong_scan())
+        db.save_assessment(run, a)
+
+        rescored = dict(a, score=42.0, rating="medium")
+        db.save_assessment(run, rescored)
+        latest = db.get_latest_assessments(guideline="nist_800_177r1")
+        assert len(latest) == 1
+        assert latest[0]["score"] == 42.0
+        assert latest[0]["rating"] == "medium"
+
+
+def test_v4_migration_deduplicates_existing_rows():
+    from data.database import Database
+    ts = "2026-07-20T10:00:00Z"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "legacy.db")
+        _legacy_v3_db(path, [
+            ("run_old", "bnb.bg", ts, "nist_800_177r1", 43.0, "medium"),
+            ("run_new", "bnb.bg", ts, "nist_800_177r1", 43.0, "medium"),
+            ("run_old", "bcl.lu", ts, "nist_800_177r1", 45.1, "medium"),
+            ("run_new", "bcl.lu", ts, "nist_800_177r1", 45.1, "medium"),
+            # A genuinely different timestamp must be preserved (history).
+            ("run_old", "bnb.bg", "2026-07-01T10:00:00Z",
+             "nist_800_177r1", 30.0, "not_implemented"),
+        ])
+        db = Database(path)                       # triggers v3 -> v4
+
+        with db._connect() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) c FROM assessments").fetchone()["c"]
+            kept = conn.execute(
+                "SELECT run_id FROM assessments WHERE domain='bnb.bg' "
+                "AND assessed_at=?", (ts,)).fetchall()
+        assert total == 3          # 2 deduped pairs + 1 historical row
+        assert len(kept) == 1
+        assert kept[0]["run_id"] == "run_new"     # newest write wins
+        assert len(db.get_latest_assessments(guideline="nist_800_177r1")) == 2
+        # History is intact for trend charts
+        assert len(db.get_domain_history("bnb.bg")) == 2
+
+
+def test_latest_assessments_dedupes_even_without_migration():
+    """A read-only/legacy DB must still render one row per domain."""
+    from data.database import Database
+    ts = "2026-07-20T10:00:00Z"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "legacy.db")
+        _legacy_v3_db(path, [
+            ("r1", "bnb.bg", ts, "nist_800_177r1", 43.0, "medium"),
+            ("r2", "bnb.bg", ts, "nist_800_177r1", 43.0, "medium"),
+        ])
+        db = Database.__new__(Database)           # skip __init__/migration
+        db.db_path = path
+        rows = db.get_latest_assessments(guideline="nist_800_177r1")
+        assert len(rows) == 1
+
+
+def test_summary_stats_not_inflated_by_duplicates():
+    from data.database import Database
+    ts = "2026-07-20T10:00:00Z"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "legacy.db")
+        _legacy_v3_db(path, [
+            ("r1", "bnb.bg", ts, "nist_800_177r1", 40.0, "medium"),
+            ("r2", "bnb.bg", ts, "nist_800_177r1", 40.0, "medium"),
+            ("r1", "bcl.lu", ts, "nist_800_177r1", 60.0, "medium"),
+            ("r2", "bcl.lu", ts, "nist_800_177r1", 60.0, "medium"),
+        ])
+        db = Database(path)
+        st = db.get_summary_stats(guideline="nist_800_177r1")
+        assert st["total_domains"] == 2            # not 4
+        assert st["ratings"]["medium"] == 2
+        assert st["avg_score"] == 50.0
+
+
+def test_db_check_flags_duplicates_and_missing_unique_index():
+    import scripts.db_check as dbc
+    ts = "2026-07-20T10:00:00Z"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "legacy.db")
+        _legacy_v3_db(path, [
+            ("r1", "bnb.bg", ts, "nist_800_177r1", 43.0, "medium"),
+            ("r2", "bnb.bg", ts, "nist_800_177r1", 43.0, "medium"),
+        ])
+        issues = dbc.run_checks(path)
+        dupes = [i for i in issues if i.check == "duplicates"]
+        assert any(i.level == "error" for i in dupes)
+        assert any(i.level == "warn" and "UNIQUE" in i.detail for i in dupes)
+
+
+def test_db_check_clean_after_migration():
+    import scripts.db_check as dbc
+    from data.database import Database
+    ts = "2026-07-20T10:00:00Z"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "legacy.db")
+        _legacy_v3_db(path, [
+            ("r1", "bnb.bg", ts, "nist_800_177r1", 43.0, "medium"),
+            ("r2", "bnb.bg", ts, "nist_800_177r1", 43.0, "medium"),
+        ])
+        Database(path)                             # migrate
+        issues = dbc.run_checks(path)
+        assert [i for i in issues if i.check == "duplicates"] == []
+
+
+def test_unique_index_blocks_raw_duplicate_insert():
+    """The constraint, not just the cleanup, must hold."""
+    import sqlite3
+    import json as _json
+    from data.database import Database
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "s.db")
+        db = Database(path)
+        run = db.create_run(["x.example"])         # run_id has a FK constraint
+        with db._connect() as conn:
+            for _ in range(2):
+                try:
+                    conn.execute(
+                        "INSERT INTO assessments (run_id, domain, assessed_at,"
+                        " guideline, score, rating, controls_json, "
+                        "findings_json) VALUES (?,?,?,?,?,?,?,?)",
+                        (run, "x.example", "2026-07-20T10:00:00Z",
+                         "nist_800_177r1", 1.0, "medium",
+                         _json.dumps({}), _json.dumps([])))
+                except sqlite3.IntegrityError:
+                    pass
+            n = conn.execute(
+                "SELECT COUNT(*) c FROM assessments").fetchone()["c"]
+        assert n == 1

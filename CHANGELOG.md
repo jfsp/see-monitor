@@ -4,6 +4,63 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.6.4] — 2026-07-24
+
+Bug-fix release. Running `scripts/reassess_all.py` duplicated every domain in
+the dashboards, once per run.
+
+### Fixed
+- **Duplicate assessments after re-assessment.** `reassess_all.py` re-scores a
+  stored scan and reuses that scan's timestamp — which is correct, because the
+  assessment describes the same measurement and inventing a new timestamp would
+  plant a fake point on every trend chart. But nothing enforced uniqueness, so
+  each run INSERTed a second row identical in `(domain, guideline,
+  assessed_at)`, and `get_latest_assessments` joins on `MAX(assessed_at)`, where
+  a tie returns *every* tied row. One reassess showed each domain twice, two
+  showed it three times, and the counts, averages and rating distributions were
+  inflated to match.
+
+  Three layers of fix:
+  1. `save_assessment` is now an **UPSERT** on `(domain, guideline,
+     assessed_at)`, so re-scoring updates the row in place. `reassess_all.py`
+     is idempotent — run it as often as you like.
+  2. **Schema v4** adds a UNIQUE index on those three columns, so duplicates
+     cannot be created by any code path, including direct SQL.
+  3. `get_latest_assessments` breaks ties on `MAX(id)`, so even a database that
+     has not been migrated (opened read-only, or restored from an old backup)
+     renders one row per domain.
+- **`db_check.py` now detects duplicates**, reporting the affected
+  domain/guideline/timestamp groups as an error, how many redundant rows would
+  be removed, and — separately — a warning when the v4 UNIQUE index is absent
+  so duplicates could reappear.
+- `db_check.py` crashed with `TypeError` when inspecting PRAGMA output: it
+  connects without a row factory, so PRAGMA rows are plain tuples and cannot be
+  indexed by column name.
+
+### Database
+- **Schema v4.** On first open, duplicate assessment rows are removed keeping
+  the highest `id` (the most recently written row, i.e. the one scored by the
+  newest code), the number removed is logged at WARNING, and a UNIQUE index is
+  created. Rows with genuinely different timestamps are untouched, so per-domain
+  history and trend charts are preserved. No data is rewritten and no scan is
+  lost. Downgrading is not supported.
+
+### Changed
+- `reassess_all.py` reports the resulting row count and any domains skipped for
+  having no stored raw scan, so an unexpected total is visible immediately.
+
+### Migration
+Deploy and open the database once — the CLI, the web app or
+`scripts/db_check.py` all trigger it:
+
+```bash
+python3 scripts/db_check.py --db /var/lib/see-monitor/see_monitor.db
+```
+
+Expect a `Schema v4: removed N duplicate assessment row(s)` warning in the log
+on the first run, then a clean report. No re-scan and no re-assessment is
+needed to clear the duplicates.
+
 ## [0.6.3] — 2026-07-24
 
 Domains with no MX record receive no mail, so grading their email security as

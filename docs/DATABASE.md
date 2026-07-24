@@ -36,6 +36,7 @@ for consistency.
 |---------|--------|
 | 1 | Initial schema. |
 | 2 | Multi-profile scoring. Added index `idx_assess_domain_guideline` on `assessments(guideline, domain, assessed_at)` for latest-per-(domain,guideline) lookups. **Index-only — no data migration.** |
+| 4 | Uniqueness of assessments. Added `UNIQUE INDEX idx_assess_unique ON assessments(domain, guideline, assessed_at)`. **Data migration:** duplicate rows are deleted first, keeping `MAX(id)` per group (the most recently written, i.e. scored by the newest code); the count removed is logged at WARNING. Rows with distinct timestamps are preserved, so history and trends are intact. Required because `save_assessment` became an UPSERT. |
 | 3 | Sub-scores and evidence quality. Added `assessments.subscores_json`, `assessments.confidence`, `assessments.confidence_notes_json`. **Additive migration:** the three columns are appended with `ALTER TABLE … ADD COLUMN` when absent, each with a default, so existing rows remain valid and readable. No data is rewritten and no row is lost. |
 
 On startup, if the stored version is missing or `< SCHEMA_VERSION`, a new
@@ -98,6 +99,15 @@ multiple rows for the same scan (see [Guideline profiles](#guideline-profiles)).
 
 Indexes: `idx_assess_domain(domain, assessed_at)`,
 `idx_assess_domain_guideline(guideline, domain, assessed_at)`.
+
+> **Assessment uniqueness (0.6.4).** There is exactly one `assessments` row per
+> `(domain, guideline, assessed_at)`. Re-scoring a stored scan reuses the
+> scan's timestamp — the assessment describes that measurement, so a new
+> timestamp would fabricate a trend point — and `save_assessment` therefore
+> UPSERTs. Before v4 nothing enforced this and every `reassess_all.py` run
+> appended a duplicate, which `get_latest_assessments` (joining on
+> `MAX(assessed_at)`) returned in full, doubling every domain in the
+> dashboards. `db_check.py` reports any duplicates and a missing UNIQUE index.
 
 > **`scheduled_scans.next_run_at` (0.6.1).** Written at creation and refreshed
 > after every run from the live APScheduler job (falling back to

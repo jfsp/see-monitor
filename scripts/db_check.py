@@ -17,6 +17,8 @@ What it checks
                  roadmap_json parse as valid JSON
   values         assessments.score in [0,100]; no_mail in {0,1};
                  confidence in {high,medium,low} (schema v3);
+  duplicates     one assessment per (domain, guideline, assessed_at), and the
+                 v4 UNIQUE index that enforces it;
                  guideline is installed; rating is valid for that guideline
   operational    (info) runs stuck in 'running'; assessments with no raw scan
   data           relational hygiene: scanned domains not linked to any org;
@@ -253,6 +255,48 @@ def _check_assessment_values(conn, out):
                              count=len(bad_rating), examples=bad_rating))
 
 
+def _check_duplicates(conn, out):
+    """
+    Duplicate assessments: more than one row for the same
+    (domain, guideline, assessed_at).
+
+    Before schema v4 nothing enforced this, and reassess_all.py — which
+    correctly reuses the original scan's timestamp — inserted a second row on
+    every run. get_latest_assessments joins on MAX(assessed_at), so a tie
+    returns every duplicate and each domain appeared N times in the dashboards.
+    Opening the database with a v4-aware build deduplicates and adds a UNIQUE
+    index; this check reports any that remain (e.g. a database only ever opened
+    read-only, or one restored from an old backup).
+    """
+    if not _table_exists(conn, "assessments"):
+        return
+    rows = conn.execute(
+        "SELECT domain, guideline, assessed_at, COUNT(*) c FROM assessments "
+        "GROUP BY domain, guideline, assessed_at HAVING c > 1 "
+        "ORDER BY c DESC, domain").fetchall()
+    if rows:
+        extra = sum(r[3] - 1 for r in rows)
+        out.append(Issue(
+            "error", "duplicates",
+            "duplicate assessments for the same domain/guideline/timestamp "
+            "(each domain will appear more than once in dashboards) — open the "
+            "database with see-monitor >= 0.6.4 to deduplicate automatically",
+            count=len(rows),
+            examples=[f"{r[0]} [{r[1]}] {r[2]} x{r[3]}" for r in rows[:10]]))
+        out.append(Issue(
+            "info", "duplicates",
+            f"{extra} redundant assessment row(s) would be removed"))
+
+    # The v4 guarantee itself: is the unique index present?
+    has_unique = any(r[1] == "idx_assess_unique"
+                     for r in conn.execute("PRAGMA index_list(assessments)"))
+    if not has_unique:
+        out.append(Issue(
+            "warn", "duplicates",
+            "assessments has no UNIQUE index on (domain, guideline, "
+            "assessed_at); duplicates can reappear on the next re-assessment"))
+
+
 def _check_confidence(conn, out):
     """v3: assessments.confidence must be one of the three evidence levels."""
     if not _table_exists(conn, "assessments"):
@@ -454,8 +498,8 @@ def _check_data_relations(conn, out):
 
 
 _CHECKS = [_check_structural, _check_schema_version, _check_orphans,
-           _check_json, _check_assessment_values, _check_confidence,
-           _check_operational, _check_data_relations]
+           _check_json, _check_assessment_values, _check_duplicates,
+           _check_confidence, _check_operational, _check_data_relations]
 
 
 def run_checks(db_path: str) -> list:
