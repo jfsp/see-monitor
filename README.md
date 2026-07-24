@@ -173,7 +173,9 @@ the fastest signal that the daemon has stopped.
 Note that `scripts/reassess_all.py` re-scores **stored** scans without
 re-querying DNS. It is the right tool after changing weights or rating bands,
 and the wrong tool after adding checks: scans taken before the upgrade contain
-none of the new data, so the new controls come back n/a.
+none of the new data, so the new controls come back n/a. It is idempotent —
+re-scoring reuses the original scan's timestamp and updates the assessment in
+place, so running it repeatedly will not duplicate rows.
 
 ---
 

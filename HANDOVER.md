@@ -362,6 +362,23 @@ detail + per-service diagnostics (works before *or* after the subcommand);
    `scripts/schedule_audit.py` are CLI-only. An admin page showing coverage %
    and a "cover all domains" button would be a natural addition.
 13. `scheduling.profiles` is honoured but not exposed in the UI.
+14. **OPEN — verify `a-epsilon.escb.eu` and siblings.** These were reported as
+   "no MX" but 0.6.3's no-mail rating did not apply to them, and their own
+   findings name MX hosts (`All MX hosts belong to one provider
+   (bancaditalia.it)`, STARTTLS on `mail01..04.bancaditalia.it`). They very
+   likely DO publish MX and are correctly graded weak, not N/A. Confirm with
+   `dig +short MX a-epsilon.escb.eu` before changing any logic. This was not
+   verifiable from the build sandbox (restricted egress).
+15. **OPEN — decide on dangling MX.** A domain whose MX records exist but whose
+   targets do not resolve currently has `has_mx=True`, so it is graded weak
+   even though it can receive no mail. `dns_hygiene.dangling_mx` already
+   detects the condition; the question is whether `no_mail` should widen to
+   "MX present but no target resolves". Deliberately NOT done unilaterally:
+   it would move domains from a scored rating to N/A and change community
+   averages, so it needs an explicit decision. Note the asymmetry — a
+   temporarily broken resolver would silently reclassify a real mail domain as
+   "no email", so any implementation should require the failure to be
+   unambiguous (all targets NXDOMAIN, not SERVFAIL/timeout).
 
 ---
 
