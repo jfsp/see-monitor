@@ -387,6 +387,51 @@ def test_timeline_and_guidelines_api():
     assert tl["buckets"][0]["ratings"] == {"compliant": 1}
 
 
+def test_pdf_reports_generate():
+    import pytest
+    pytest.importorskip("reportlab")
+    from reports.pdf_report import (
+        build_scope_report_pdf, build_trend_report_pdf)
+    bands = [{"rating": "not_implemented", "min_score": 0, "color": "#d64545"},
+             {"rating": "partial", "min_score": 40, "color": "#e0a030"},
+             {"rating": "compliant", "min_score": 80, "color": "#3aa76d"}]
+    meta = {"scope_label": "org: X", "guideline_id": "bsi_tr03182",
+            "guideline_name": "BSI TR-03182", "generated_at": "2026-07-22",
+            "total": 2, "avg_score": 55.0,
+            "ratings": {"compliant": 1, "not_implemented": 1}, "period": "weekly"}
+    ass = [{"domain": "a", "score": 90, "rating": "compliant"},
+           {"domain": "b", "score": 20, "rating": "not_implemented"}]
+    buckets = [{"label": "2026-W24", "avg_score": 55, "domains": 2, "scans": 2,
+                "ratings": {"compliant": 1, "not_implemented": 1}}]
+    assert build_scope_report_pdf(meta, ass, buckets, bands)[:4] == b"%PDF"
+    assert build_trend_report_pdf(meta, buckets, bands)[:4] == b"%PDF"
+    # empty scope must not raise
+    assert build_scope_report_pdf({**meta, "total": 0, "ratings": {}}, [], [],
+                                  bands)[:4] == b"%PDF"
+
+
+def test_report_pdf_endpoints():
+    import pytest
+    pytest.importorskip("reportlab")
+    os.environ["SEE_SECRET_KEY"] = "p" * 32
+    path = tempfile.mktemp(suffix=".db")
+    db = Database(path)
+    run = db.create_run(["a.com"])
+    db.save_assessment(run, _mk_assessment(
+        "a.com", "2026-06-10T10:00:00+00:00", 80, "strong"))
+    db.finish_run(run)
+    from app_factory import create_app
+    app = create_app({"db_path": path, "scanning": {"active_smtp": False}})
+    client = app.test_client()
+    client.post("/login", data={"username": "admin", "password": "changeme123"})
+    for url in ("/app/api/report/pdf", "/app/api/report/trend.pdf?period=monthly",
+                "/app/api/report/pdf?domain=a.com"):
+        r = client.get(url)
+        assert r.status_code == 200
+        assert r.headers["Content-Type"] == "application/pdf"
+        assert r.get_data()[:4] == b"%PDF"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

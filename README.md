@@ -263,8 +263,9 @@ this release (no schema column is provisioned for it yet).
 
 ## TODO / not completed in the initial build
 
-- **Group PDF/HTML report export** — the API and CSV/JSON exporters exist
-  (`reports/report_generator.py`); a formatted PDF export is not yet wired up.
+- **Group PDF report export** — done (v0.5.0). `reports/pdf_report.py` +
+  `GET /app/api/report/{pdf,trend.pdf}` render profile-aware scope and trend
+  PDFs (reportlab). HTML export remains optional/not wired.
 - **Admin UI for DKIM selectors and scheduled scans** — the backend endpoints
   and scheduler exist; management screens are minimal.
 - **Censys parsing coverage** — `scanner/censys_client.py` maps the common

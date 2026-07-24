@@ -183,6 +183,21 @@ function ratingColor(r){
 }
 async function setGuideline(id){ GUIDELINE = id; render(); }
 
+// Open a server-rendered PDF (cookies carry auth). kind: "pdf"|"trend.pdf".
+// scopeQ is a query fragment like "community=1" / "domain=x" / "" (all).
+function pdfExport(kind, scopeQ, period){
+  let q = "guideline="+encodeURIComponent(GUIDELINE);
+  if(scopeQ) q += "&"+scopeQ;
+  if(period) q += "&period="+encodeURIComponent(period);
+  window.open("/app/api/report/"+kind+"?"+q, "_blank");
+}
+function exportButtons(scopeQ, period){
+  return `<button class="btn ghost" onclick="pdfExport('pdf','${scopeQ||''}'${
+      period?`,'${period}'`:''})">PDF report</button>
+    <button class="btn ghost" onclick="pdfExport('trend.pdf','${scopeQ||''}'${
+      period?`,'${period}'`:''})">Trend PDF</button>`;
+}
+
 async function api(path, opts){
   // Auto-scope GET requests to the selected conformance profile.
   if(!opts){
@@ -274,7 +289,10 @@ views.overview = async () => {
 
   return `<div class="grid cards">${kpis}</div>
     <div class="panel" style="margin-top:1rem">
-      <h3>Status distribution — ${esc(g?g.name:GUIDELINE)}</h3>
+      <div class="flex" style="justify-content:space-between">
+        <h3 style="margin:0">Status distribution — ${esc(g?g.name:GUIDELINE)}</h3>
+        <div class="flex">${exportButtons('')}</div>
+      </div>
       ${total? statusBar(rd,{link:true})+statusKpis(rd,total)
              : '<div class="empty">No assessments yet</div>'}
       <div class="muted" style="font-size:.72rem;margin-top:.6rem">
@@ -328,6 +346,7 @@ views.domain = async (domain) => {
       <span class="spacer" style="margin-left:auto"></span>
       <button class="btn ghost" onclick="rescan('${esc(domain)}')">Re-scan</button>
       <button class="btn ghost" onclick="go('trends','domain=${encodeURIComponent(domain)}','domain: ${esc(domain)}')">Trends</button>
+      ${exportButtons('domain='+encodeURIComponent(domain))}
       <button class="btn" onclick="go('roadmap','${esc(domain)}')">Roadmap</button>
     </div>`;
   if(!a){ return head + `<div class="empty">No assessment yet.</div></div>`; }
@@ -438,21 +457,35 @@ views.organisations = async () => {
 views.org = async (id) => {
   const d = await api("/org/"+id);
   const o = d.organisation;
-  let rows = (d.assessments||[]).sort((a,b)=>a.score-b.score).map(a=>`
+  const st = d.stats||{};
+  const rd = st.ratings||{};
+  const total = st.total_domains||0;
+  const g = currentGuideline();
+  const scopeQ = "org="+id;
+  let rows = (d.assessments||[]).slice().sort((a,b)=>a.score-b.score).map(a=>`
     <tr class="clickable" onclick="go('domain','${esc(a.domain)}')">
       <td>${esc(a.domain)}</td>
       <td style="color:${scoreColor(a.score)}">${a.score}</td>
-      <td>${ratingPill(a.rating)}</td></tr>`).join("");
+      <td>${ratingPill(a.rating)}</td>
+      <td class="muted">${a.no_mail?'<span class="tag">no mail</span>':''}</td></tr>`).join("");
   let unassessed = (d.unassessed||[]).map(x=>`<code>${esc(x)}</code>`).join(" ");
   return `<span class="back" onclick="go('organisations')">← Organisations</span>
-    <div class="panel"><div class="flex"><h3 style="margin:0">${esc(o.name)}</h3>
-      <span class="spacer" style="margin-left:auto"></span>
-      <button class="btn ghost" onclick="groupRoadmap('org',${id})">Group roadmap</button>
-    </div>
-    <div class="muted">${esc(o.sector||'')} · ${esc(o.country_code||'')} ${esc(o.region||'')}</div>
+    <div class="panel"><div class="flex" style="justify-content:space-between">
+        <div><h3 style="margin:0">${esc(o.name)}</h3>
+          <div class="muted">${esc(o.sector||'')} · ${esc(o.country_code||'')} ${esc(o.region||'')}
+            · ${esc(g?g.name:GUIDELINE)}</div></div>
+        <div class="flex">${exportButtons(scopeQ)}
+          <button class="btn ghost" onclick="go('trends','${scopeQ}','org: ${esc(o.name)}')">Trends →</button>
+          <button class="btn ghost" onclick="groupRoadmap('org',${id})">Roadmap</button></div>
+      </div>
+      <div class="flex" style="margin:.6rem 0"><b>${total}</b> domains · avg
+        <span style="color:${scoreColor(st.avg_score)}">${st.avg_score??0}</span></div>
+      ${total? statusBar(rd,{link:false})+statusKpis(rd,total)
+             : '<div class="muted">No assessments yet.</div>'}
     </div>
     <div class="panel" style="margin-top:1rem"><h3>Domains (${(d.assessments||[]).length})</h3>
-    <table><tbody>${rows||'<tr><td class="muted">No assessments.</td></tr>'}</tbody></table>
+    <table><thead><tr><th>Domain</th><th>Score</th><th>Rating</th><th></th></tr></thead>
+    <tbody>${rows||'<tr><td class="muted">No assessments.</td></tr>'}</tbody></table>
     ${unassessed?`<div class="muted" style="margin-top:.6rem">Not yet assessed: ${unassessed}</div>`:''}
     </div>`;
 };
@@ -500,8 +533,9 @@ views.groupreport = async (kind, key, label) => {
   return `<span class="back" onclick="go('groups')">← Group reports</span>
     <div class="panel"><div class="flex" style="justify-content:space-between">
         <h3 style="margin:0">${esc(label)} — ${kind} · ${esc(g?g.name:GUIDELINE)}</h3>
+        <div class="flex">${exportButtons(scopeQ)}
         <button class="btn ghost" onclick="go('trends','${scopeQ}','${esc(label)}')">
-          View trends →</button></div>
+          View trends →</button></div></div>
       <div class="flex" style="margin:.6rem 0"><b>${t.orgs||0}</b> orgs ·
         <b>${t.domains||0}</b> domains · avg
         <span style="color:${scoreColor(t.avg_score)}">${t.avg_score||0}</span></div>
@@ -642,6 +676,8 @@ views.trends = async (scopeQ, label) => {
         <input id="tdom" placeholder="example.com" style="width:180px"
           onkeydown="if(event.key==='Enter')trendDomain(this.value)">
         <button class="btn ghost" onclick="trendDomain($('#tdom').value)">Go</button>
+        <span class="spacer" style="margin-left:auto"></span>
+        ${exportButtons(_trend.scope,_trend.period)}
         <span class="muted">${data.domains==null?'all':data.domains} domain(s) · ${deltaTxt}</span>
       </div>
       ${drawTrend(b)}

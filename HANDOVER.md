@@ -1,6 +1,6 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.4.0 · **Status:** functional, all tests passing (20) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.5.0 · **Status:** functional, all tests passing (22) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -39,7 +39,7 @@ shows all profiles (`--profile` to limit).
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
 
-Run tests: `python3 -m pytest tests/test_smoke.py -q` (20 passing).
+Run tests: `python3 -m pytest tests/test_smoke.py -q` (22 passing).
 Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycache__*")`.
 
 ---
@@ -49,7 +49,8 @@ Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycac
 ```
 see_monitor.py          CLI: scan / serve / init-db / scheduler-daemon
 app_factory.py          Flask factory (RBAC, security headers, blueprints)
-app_routes.py           /app/* dashboard REST API (role-scoped, guideline-aware); +/api/timeline, +/api/guidelines(bands)
+app_routes.py           /app/* dashboard REST API (role-scoped, guideline-aware);
+                        +/api/timeline, +/api/guidelines(bands), +/api/report/{pdf,trend.pdf}
 dashboard/app.py        DASHBOARD_HTML SPA: profile selector, status dashboards
                         (segmented bars), Trends (inline SVG timeline chart)
 scanner/
@@ -74,6 +75,7 @@ data/
   geo_inference.py, tld_geo.csv   country tagging (reused)
 roadmap/generator.py    per-domain + group roadmaps
 reports/report_generator.py  CSV/JSON export
+  reports/pdf_report.py        reportlab scope + trend PDF reports (profile-aware)
 guidelines/*.json       scoring profiles: nist_800_177r1 (default) +
                         bsi_tr03182, acn_email, ccn_cert_bp02
 auth/ admin/ scheduler/ reused from pqc-monitor, rewired to the new DB API

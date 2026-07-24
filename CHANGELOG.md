@@ -4,6 +4,25 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.5.0] — 2026-07-21
+
+### Added
+- **PDF export (reportlab).** Two profile-aware, server-rendered reports served
+  with session auth: `GET /app/api/report/pdf` (scope report: header + status
+  distribution + KPIs + per-domain table + embedded trend chart) and
+  `GET /app/api/report/trend.pdf` (trend chart + per-period table). Both honour
+  the selected `guideline`, the same scope resolver as the timeline
+  (domain/org/community/country/region/all), and `period=`. "PDF report" and
+  "Trend PDF" buttons appear on Overview, group reports, org, domain and Trends
+  views. reportlab is the only new dependency (pure-Python); routes return a
+  clean 501 if it is absent.
+- **Organisation status dashboard.** The org detail page now matches the other
+  status dashboards: segmented status bar + per-status KPIs + status-coloured
+  domain table, with Trends and PDF export buttons.
+- Charts (status bar + stacked-status/score trend) are drawn as reportlab
+  vector graphics in `reports/pdf_report.py`.
+- Tests: PDF builders + PDF endpoints (reportlab-guarded via importorskip); 22 total.
+
 ## [0.4.0] — 2026-07-21
 
 ### Added

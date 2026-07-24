@@ -422,6 +422,76 @@ def api_timeline():
     })
 
 
+@app_bp.route("/api/report/pdf")
+@require_auth
+def api_report_pdf():
+    return _serve_pdf(kind="scope")
+
+
+@app_bp.route("/api/report/trend.pdf")
+@require_auth
+def api_report_trend_pdf():
+    return _serve_pdf(kind="trend")
+
+
+def _slug(text: str) -> str:
+    keep = "".join(ch if ch.isalnum() else "-" for ch in (text or "report"))
+    return "-".join(p for p in keep.lower().split("-") if p)[:60] or "report"
+
+
+def _serve_pdf(kind: str):
+    from flask import Response
+    user = current_user()
+    db = _db()
+    try:
+        domains, label = _scope_domains(user, db)
+    except PermissionError:
+        return jsonify({"error": "forbidden"}), 403
+
+    gid = _guideline()
+    period = (request.args.get("period") or "weekly").lower()
+    from scanner.assessor import load_guideline
+    try:
+        guideline = load_guideline(None, gid)
+    except Exception:
+        guideline = {"name": gid, "rating_bands": []}
+
+    stats = db.get_summary_stats(domains, guideline=gid)
+    buckets = db.get_timeline(domains, guideline=gid, period=period)
+    from datetime import datetime, timezone
+    meta = {
+        "scope_label": label, "guideline_id": gid,
+        "guideline_name": guideline.get("name", gid),
+        "generated_at": datetime.now(timezone.utc)
+        .strftime("%Y-%m-%d %H:%M UTC"),
+        "total": stats.get("total_domains", 0),
+        "avg_score": stats.get("avg_score", 0),
+        "ratings": stats.get("ratings", {}),
+        "period": period,
+    }
+    bands = guideline.get("rating_bands", [])
+
+    try:
+        from reports.pdf_report import (
+            build_scope_report_pdf, build_trend_report_pdf)
+    except ImportError:
+        return jsonify({
+            "error": "PDF export requires the 'reportlab' package "
+                     "(pip install reportlab)."}), 501
+
+    if kind == "trend":
+        pdf = build_trend_report_pdf(meta, buckets, bands)
+        fname = f"see-{_slug(label)}-{gid}-trend.pdf"
+    else:
+        assessments = db.get_latest_assessments(domains, guideline=gid)
+        pdf = build_scope_report_pdf(meta, assessments, buckets, bands)
+        fname = f"see-{_slug(label)}-{gid}.pdf"
+
+    return Response(
+        pdf, mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
 # ----------------------------------------------------------------------
 # Roadmaps
 # ----------------------------------------------------------------------

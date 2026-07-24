@@ -26,6 +26,9 @@ pyyaml>=6.0.1
 # CLI
 click>=8.1.7
 
+# PDF report export (scope + trend reports). Pure-Python, no system libs.
+reportlab>=4.0.0
+
 # WSGI server for production
 gunicorn>=22.0.0
 
