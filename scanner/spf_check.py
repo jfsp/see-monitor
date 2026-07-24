@@ -71,7 +71,11 @@ def check_spf(domain: str, dns_client: DNSClient | None = None) -> dict:
     out = {"control": "spf", "present": False, "valid": False,
            "record": None, "records": [], "all_qualifier": None,
            "all_policy": None, "has_redirect": False,
-           "lookup_count": 0, "exceeds_lookup_limit": False, "issues": []}
+           "lookup_count": 0, "exceeds_lookup_limit": False,
+           # BSI TR-03182-01 / ACN notational + hardfail signals
+           "all_is_last": None, "uses_ptr": False,
+           "ip_mechanisms": 0, "name_mechanisms": 0, "mostly_ip": None,
+           "deny_all": False, "issues": []}
 
     records = _get_spf_records(domain, dc)
     out["records"] = records
@@ -90,6 +94,36 @@ def check_spf(domain: str, dns_client: DNSClient | None = None) -> dict:
     record = records[0]
     out["record"] = record
     out["valid"] = True
+
+    # ---- Notational / mechanism analysis (BSI TR-03182-01, ACN) --------
+    terms = record.split()[1:]              # drop the leading v=spf1
+    non_all = [t for t in terms if t.lstrip("+-~?").lower() != "all"]
+    if terms:
+        out["all_is_last"] = terms[-1].lstrip("+-~?").lower() == "all"
+        if out["all_is_last"] is False and any(
+                t.lstrip("+-~?").lower() == "all" for t in terms):
+            out["issues"].append(
+                "'all' is not the last mechanism — terms after it are ignored "
+                "(BSI TR-03182-01)")
+    for t in terms:
+        bare = t.lstrip("+-~?").lower()
+        if bare == "ptr" or bare.startswith("ptr:"):
+            out["uses_ptr"] = True
+        if bare.startswith(("ip4:", "ip6:")):
+            out["ip_mechanisms"] += 1
+        elif bare in ("a", "mx") or bare.startswith(("a:", "a/", "mx:", "mx/",
+                                                     "include:", "exists:")):
+            out["name_mechanisms"] += 1
+    if out["uses_ptr"]:
+        out["issues"].append(
+            "'ptr' mechanism is deprecated (RFC 7208 §5.5) and slow — remove it")
+    total_mech = out["ip_mechanisms"] + out["name_mechanisms"]
+    if total_mech:
+        out["mostly_ip"] = out["ip_mechanisms"] >= out["name_mechanisms"]
+    # A pure deny-all policy: 'v=spf1 -all' (no other sources) — the correct
+    # posture for a parked / non-sending domain (BSI TR-03182-11).
+    out["deny_all"] = (not non_all) and bool(
+        re.search(r"(?:^|\s)-all(?:\s|$)", record))
 
     m = re.search(r"(?:^|\s)([+\-~?]?)all(?:\s|$)", record)
     if m:

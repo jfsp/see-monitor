@@ -20,6 +20,7 @@ from scanner.dmarc_check import check_dmarc
 from scanner.policy_checks import (
     check_mta_sts, check_tlsrpt, check_dnssec, check_dane, check_bimi)
 from scanner.smtp_tls_check import check_starttls
+from scanner.client_tls_check import check_client_tls
 from scanner.shodan_client import ShodanClient
 from scanner.censys_client import CensysClient
 from scanner.dnsdumpster_client import DNSDumpsterClient
@@ -118,6 +119,8 @@ class ScanOrchestrator:
         checks["starttls"] = self._safe(
             check_starttls, mx_hosts, self.shodan, self.censys,
             self.active_smtp, self.timeout)
+        checks["client_tls"] = self._safe(
+            check_client_tls, domain, self.dns, self.active_smtp, self.timeout)
         checks["bimi"] = self._safe(check_bimi, domain, self.dns)
 
         # Persist newly discovered wordlist selectors so future scans keep them

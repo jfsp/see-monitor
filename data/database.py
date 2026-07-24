@@ -29,7 +29,10 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "data/see_monitor.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Assessments are now stored per (domain, guideline); this is the guideline
+# used when a caller does not specify one, preserving pre-v2 behaviour.
+DEFAULT_GUIDELINE_ID = "nist_800_177r1"
 
 
 def _now() -> str:
@@ -104,6 +107,9 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_assess_domain
                 ON assessments(domain, assessed_at);
+            -- v2: latest-per-(domain,guideline) lookups for multi-profile scoring
+            CREATE INDEX IF NOT EXISTS idx_assess_domain_guideline
+                ON assessments(guideline, domain, assessed_at);
 
             CREATE TABLE IF NOT EXISTS dkim_selectors (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -197,7 +203,11 @@ class Database:
             """)
             row = conn.execute(
                 "SELECT MAX(version) FROM schema_version").fetchone()
-            if row[0] is None:
+            current = row[0]
+            # Fresh DB, or an older DB that predates a version: record the
+            # current schema version. The v1->v2 change is index-only (added
+            # above with IF NOT EXISTS), so no data migration is required.
+            if current is None or current < SCHEMA_VERSION:
                 conn.execute(
                     "INSERT INTO schema_version (version, applied_at) "
                     "VALUES (?,?)", (SCHEMA_VERSION, _now()))
@@ -274,29 +284,62 @@ class Database:
         d["no_mail"] = bool(d["no_mail"])
         return d
 
-    def get_latest_assessments(self, domains: Optional[list] = None) -> list:
-        """Latest assessment per domain (optionally restricted)."""
-        sql = ("SELECT a.* FROM assessments a JOIN ("
-               "  SELECT domain, MAX(assessed_at) AS ts FROM assessments "
-               "  GROUP BY domain) m "
-               "ON a.domain=m.domain AND a.assessed_at=m.ts")
+    def get_guidelines_present(self) -> list[str]:
+        """Distinct guideline ids that have stored assessments."""
         with self._connect() as conn:
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(
+                "SELECT DISTINCT guideline FROM assessments "
+                "ORDER BY guideline").fetchall()
+        return [r["guideline"] for r in rows]
+
+    def get_latest_assessments(self, domains: Optional[list] = None,
+                               guideline: Optional[str] = DEFAULT_GUIDELINE_ID
+                               ) -> list:
+        """Latest assessment per domain for one guideline profile.
+
+        guideline=None returns the latest per (domain, guideline) across all
+        profiles (used for exports); otherwise it is filtered to that profile.
+        """
+        if guideline is None:
+            sql = ("SELECT a.* FROM assessments a JOIN ("
+                   "  SELECT domain, guideline, MAX(assessed_at) AS ts "
+                   "  FROM assessments GROUP BY domain, guideline) m "
+                   "ON a.domain=m.domain AND a.guideline=m.guideline "
+                   "AND a.assessed_at=m.ts")
+            params: tuple = ()
+        else:
+            sql = ("SELECT a.* FROM assessments a JOIN ("
+                   "  SELECT domain, MAX(assessed_at) AS ts FROM assessments "
+                   "  WHERE guideline=? GROUP BY domain) m "
+                   "ON a.domain=m.domain AND a.assessed_at=m.ts "
+                   "WHERE a.guideline=?")
+            params = (guideline, guideline)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
         out = [self._parse_assessment_row(r) for r in rows]
         if domains is not None:
             allowed = {d.strip().lower() for d in domains}
             out = [a for a in out if a["domain"] in allowed]
         return out
 
-    def get_domain_history(self, domain: str, limit: int = 50) -> list:
+    def get_domain_history(self, domain: str, limit: int = 50,
+                           guideline: Optional[str] = DEFAULT_GUIDELINE_ID
+                           ) -> list:
+        sql = "SELECT * FROM assessments WHERE domain=?"
+        params: list = [domain]
+        if guideline is not None:
+            sql += " AND guideline=?"
+            params.append(guideline)
+        sql += " ORDER BY assessed_at DESC LIMIT ?"
+        params.append(limit)
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM assessments WHERE domain=? "
-                "ORDER BY assessed_at DESC LIMIT ?", (domain, limit)).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [self._parse_assessment_row(r) for r in rows]
 
-    def get_summary_stats(self, domains: Optional[list] = None) -> dict:
-        latest = self.get_latest_assessments(domains)
+    def get_summary_stats(self, domains: Optional[list] = None,
+                          guideline: Optional[str] = DEFAULT_GUIDELINE_ID
+                          ) -> dict:
+        latest = self.get_latest_assessments(domains, guideline)
         ratings = {"not_implemented": 0, "medium": 0, "strong": 0,
                    "very_strong": 0}
         control_impl: dict = {}
@@ -606,18 +649,19 @@ class Database:
     # ------------------------------------------------------------------
     # Aggregates for group reports
     # ------------------------------------------------------------------
-    def _org_latest_assessments(self, org_id: int) -> list[dict]:
+    def _org_latest_assessments(self, org_id: int,
+                                guideline: str = DEFAULT_GUIDELINE_ID
+                                ) -> list[dict]:
         domains = self.get_org_domains(org_id)
-        return self.get_latest_assessments(domains) if domains else []
+        return self.get_latest_assessments(domains, guideline) if domains else []
 
-    def _build_group_aggregate(self, orgs: list[dict]) -> dict:
-        out = {"organisations": [], "totals": {
-            "orgs": len(orgs), "domains": 0, "avg_score": 0.0,
-            "ratings": {"not_implemented": 0, "medium": 0, "strong": 0,
-                        "very_strong": 0}}}
+    def _build_group_aggregate(self, orgs: list[dict],
+                               guideline: str = DEFAULT_GUIDELINE_ID) -> dict:
+        out = {"guideline": guideline, "organisations": [], "totals": {
+            "orgs": len(orgs), "domains": 0, "avg_score": 0.0, "ratings": {}}}
         scores = []
         for org in orgs:
-            assessments = self._org_latest_assessments(org["id"])
+            assessments = self._org_latest_assessments(org["id"], guideline)
             org_scores = [a["score"] for a in assessments]
             entry = {
                 "id": org["id"], "name": org["name"],
@@ -627,12 +671,13 @@ class Database:
                 "domains": len(assessments),
                 "avg_score": round(sum(org_scores) / len(org_scores), 1)
                 if org_scores else None,
-                "ratings": {"not_implemented": 0, "medium": 0,
-                            "strong": 0, "very_strong": 0},
+                "ratings": {},
             }
             for a in assessments:
-                entry["ratings"][a["rating"]] += 1
-                out["totals"]["ratings"][a["rating"]] += 1
+                entry["ratings"][a["rating"]] = \
+                    entry["ratings"].get(a["rating"], 0) + 1
+                out["totals"]["ratings"][a["rating"]] = \
+                    out["totals"]["ratings"].get(a["rating"], 0) + 1
             out["totals"]["domains"] += len(assessments)
             scores.extend(org_scores)
             out["organisations"].append(entry)
@@ -640,9 +685,10 @@ class Database:
             out["totals"]["avg_score"] = round(sum(scores) / len(scores), 1)
         return out
 
-    def get_community_aggregate(self, community_id: int) -> dict:
+    def get_community_aggregate(self, community_id: int,
+                                guideline: str = DEFAULT_GUIDELINE_ID) -> dict:
         orgs = self.get_community_orgs(community_id)
-        agg = self._build_group_aggregate(orgs)
+        agg = self._build_group_aggregate(orgs, guideline)
         agg["community"] = self.get_community(community_id)
         return agg
 
@@ -664,22 +710,24 @@ class Database:
         return [dict(r) for r in rows]
 
     def get_country_aggregate(self, country_code: str,
-                              allowed_org_ids: Optional[set] = None) -> dict:
+                              allowed_org_ids: Optional[set] = None,
+                              guideline: str = DEFAULT_GUIDELINE_ID) -> dict:
         orgs = [o for o in self.get_organisations()
                 if o.get("country_code", "").upper() == country_code.upper()]
         if allowed_org_ids is not None:
             orgs = [o for o in orgs if o["id"] in allowed_org_ids]
-        agg = self._build_group_aggregate(orgs)
+        agg = self._build_group_aggregate(orgs, guideline)
         agg["country_code"] = country_code.upper()
         return agg
 
     def get_region_aggregate(self, region: str,
-                             allowed_org_ids: Optional[set] = None) -> dict:
+                             allowed_org_ids: Optional[set] = None,
+                             guideline: str = DEFAULT_GUIDELINE_ID) -> dict:
         orgs = [o for o in self.get_organisations()
                 if o.get("region", "") == region]
         if allowed_org_ids is not None:
             orgs = [o for o in orgs if o["id"] in allowed_org_ids]
-        agg = self._build_group_aggregate(orgs)
+        agg = self._build_group_aggregate(orgs, guideline)
         agg["region"] = region
         return agg
 

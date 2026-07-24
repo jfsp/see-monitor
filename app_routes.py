@@ -37,6 +37,14 @@ def _cfg():
     return current_app.config.get("APP_CONFIG", {})
 
 
+def _guideline():
+    """Guideline profile from ?guideline=; validated, defaults to NIST."""
+    from data.database import DEFAULT_GUIDELINE_ID
+    from scanner.assessor import available_guidelines
+    gid = (request.args.get("guideline") or "").strip()
+    return gid if gid in available_guidelines() else DEFAULT_GUIDELINE_ID
+
+
 def _allowed_domains(user):
     """None for admins (no filter), else the set of visible domains."""
     if user.is_admin:
@@ -72,13 +80,32 @@ def dashboard_home(_=None):
 # ----------------------------------------------------------------------
 # Summary + assessments
 # ----------------------------------------------------------------------
+@app_bp.route("/api/guidelines")
+@require_auth
+def api_guidelines():
+    """List installed conformance profiles + which are present in stored data."""
+    from scanner.assessor import available_guidelines, load_guideline
+    from data.database import DEFAULT_GUIDELINE_ID
+    present = set(_db().get_guidelines_present())
+    out = []
+    for gid in available_guidelines():
+        try:
+            g = load_guideline(None, gid)
+            out.append({"id": gid, "name": g.get("name", gid),
+                        "has_data": gid in present,
+                        "is_default": gid == DEFAULT_GUIDELINE_ID})
+        except Exception:
+            continue
+    return jsonify(out)
+
+
 @app_bp.route("/api/summary")
 @require_auth
 def api_summary():
     user = current_user()
     allowed = _allowed_domains(user)
     stats = _db().get_summary_stats(
-        None if allowed is None else list(allowed))
+        None if allowed is None else list(allowed), guideline=_guideline())
     return jsonify(stats)
 
 
@@ -86,7 +113,7 @@ def api_summary():
 @require_auth
 def api_assessments():
     user = current_user()
-    assessments = _db().get_latest_assessments()
+    assessments = _db().get_latest_assessments(guideline=_guideline())
     return jsonify(filter_assessments(assessments, user))
 
 
@@ -99,7 +126,7 @@ def api_domain_detail(domain):
     if allowed is not None and domain not in allowed:
         return jsonify({"error": "forbidden"}), 403
     db = _db()
-    history = db.get_domain_history(domain, limit=30)
+    history = db.get_domain_history(domain, limit=30, guideline=_guideline())
     scans = db.get_domain_scans(domain, limit=1)
     return jsonify({
         "domain": domain,
@@ -151,13 +178,14 @@ def _run_scan(app, run_id: str, domains: list[str]):
         db = app.config["SEE_DB"]
         orch = app.config["ORCHESTRATOR"]
         cfg = app.config.get("APP_CONFIG", {})
-        from scanner.assessor import assess_domain
+        from scanner.assessor import assess_all_profiles
         status = "completed"
         for d in domains:
             try:
                 scan = orch.scan_domain(d)
                 db.save_scan_result(run_id, scan)
-                db.save_assessment(run_id, assess_domain(scan, cfg))
+                for a in assess_all_profiles(scan, cfg).values():
+                    db.save_assessment(run_id, a)
             except Exception:
                 logger.exception("Scan failed for %s", d)
                 status = "completed_with_errors"
@@ -223,14 +251,15 @@ def api_org_detail(org_id):
     if not org:
         return jsonify({"error": "not found"}), 404
     domains = db.get_org_domains(org_id)
-    assessments = db.get_latest_assessments(domains)
+    gid = _guideline()
+    assessments = db.get_latest_assessments(domains, guideline=gid)
     assessed = {a["domain"] for a in assessments}
     return jsonify({
         "organisation": org,
         "domains": domains,
         "unassessed": sorted(set(domains) - assessed),
         "assessments": assessments,
-        "stats": db.get_summary_stats(domains),
+        "stats": db.get_summary_stats(domains, guideline=gid),
     })
 
 
@@ -256,7 +285,7 @@ def api_community_report(cid):
     if not user.is_admin and \
             cid not in (getattr(user, "community_ids", []) or []):
         return jsonify({"error": "forbidden"}), 403
-    return jsonify(_db().get_community_aggregate(cid))
+    return jsonify(_db().get_community_aggregate(cid, guideline=_guideline()))
 
 
 @app_bp.route("/api/countries")
@@ -282,7 +311,8 @@ def api_country_report(code):
     user = current_user()
     db = _db()
     return jsonify(db.get_country_aggregate(
-        code, allowed_org_ids=_allowed_org_ids(user, db)))
+        code, allowed_org_ids=_allowed_org_ids(user, db),
+        guideline=_guideline()))
 
 
 @app_bp.route("/api/regions")
@@ -307,7 +337,8 @@ def api_region_report(region):
     user = current_user()
     db = _db()
     return jsonify(db.get_region_aggregate(
-        region, allowed_org_ids=_allowed_org_ids(user, db)))
+        region, allowed_org_ids=_allowed_org_ids(user, db),
+        guideline=_guideline()))
 
 
 # ----------------------------------------------------------------------
@@ -323,7 +354,7 @@ def api_domain_roadmap(domain):
         return jsonify({"error": "forbidden"}), 403
     from roadmap.generator import generate_domain_roadmap
     db = _db()
-    history = db.get_domain_history(domain, limit=1)
+    history = db.get_domain_history(domain, limit=1, guideline=_guideline())
     if not history:
         return jsonify({"error": "no assessment for this domain"}), 404
     scans = db.get_domain_scans(domain, limit=1)
@@ -358,5 +389,5 @@ def api_group_roadmap():
         allowed = _allowed_domains(user)
         domains = None if allowed is None else list(allowed)
         label = "all"
-    assessments = db.get_latest_assessments(domains)
+    assessments = db.get_latest_assessments(domains, guideline=_guideline())
     return jsonify(generate_group_roadmap(assessments, label))

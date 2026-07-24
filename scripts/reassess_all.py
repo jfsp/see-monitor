@@ -18,13 +18,17 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from data.database import Database          # noqa: E402
-from scanner.assessor import assess_domain  # noqa: E402
+from data.database import Database                       # noqa: E402
+from scanner.assessor import (assess_all_profiles,        # noqa: E402
+                              available_guidelines)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/config.yaml")
+    ap.add_argument("--profile", action="append", default=None,
+                    help="Limit to specific guideline profile(s); repeatable. "
+                         "Default: all installed profiles.")
     args = ap.parse_args()
 
     cfg = {}
@@ -33,6 +37,7 @@ def main():
         with open(args.config, encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
 
+    gids = args.profile or available_guidelines()
     db = Database(cfg.get("db_path", "data/see_monitor.db"))
     domains = db.get_all_known_domains()
     run_id = db.create_run(domains, trigger="reassess")
@@ -44,11 +49,12 @@ def main():
         scan = {"domain": domain,
                 "scanned_at": scans[0]["scanned_at"],
                 "checks": scans[0]["checks"]}
-        db.save_assessment(run_id, assess_domain(scan, cfg))
+        for a in assess_all_profiles(scan, cfg, gids).values():
+            db.save_assessment(run_id, a)
         db.bump_run_progress(run_id)
         n += 1
     db.finish_run(run_id)
-    print(f"Re-assessed {n} domain(s) into run {run_id}.")
+    print(f"Re-assessed {n} domain(s) x {len(gids)} profile(s) into run {run_id}.")
 
 
 if __name__ == "__main__":

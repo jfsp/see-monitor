@@ -75,12 +75,14 @@ def init_db(ctx):
 
 
 _CONTROLS = ["spf", "dkim", "dmarc", "starttls", "dnssec", "dane",
-             "mta_sts", "tlsrpt", "bimi"]
+             "mta_sts", "tlsrpt", "bimi", "client_tls"]
 _CTRL_LABEL = {"spf": "SPF", "dkim": "DKIM", "dmarc": "DMARC",
                "starttls": "STARTTLS", "dnssec": "DNSSEC", "dane": "DANE",
-               "mta_sts": "MTA-STS", "tlsrpt": "TLS-RPT", "bimi": "BIMI"}
+               "mta_sts": "MTA-STS", "tlsrpt": "TLS-RPT", "bimi": "BIMI",
+               "client_tls": "CLIENT-TLS"}
 _RATING_COLOR = {"not_implemented": "red", "medium": "yellow",
-                 "strong": "cyan", "very_strong": "green"}
+                 "strong": "cyan", "very_strong": "green",
+                 "partial": "yellow", "compliant": "green"}
 
 
 def _glyph(score):
@@ -93,7 +95,8 @@ def _glyph(score):
     return click.style("✓", fg="green")
 
 
-def _render_scan(scan: dict, a: dict, verbose: bool) -> str:
+def _render_scan(scan: dict, a: dict, verbose: bool,
+                 profiles: dict | None = None) -> str:
     checks = scan.get("checks", {})
     svc = scan.get("services", {})
     cs = a.get("control_scores", {})
@@ -105,6 +108,20 @@ def _render_scan(scan: dict, a: dict, verbose: bool) -> str:
     rating = a["rating"]
     L.append(f"  Score       {click.style(str(a['score']), bold=True)} / 100   "
              + click.style(f"({rating})", fg=_RATING_COLOR.get(rating)))
+
+    # Per-profile scores (national conformance profiles)
+    if profiles:
+        cells = []
+        for gid, pa in profiles.items():
+            comp = pa.get("compliant")
+            mark = ("" if comp is None
+                    else click.style(" ✓ compliant", fg="green") if comp
+                    else click.style(" ✗ non-compliant", fg="red"))
+            cells.append(
+                f"{gid} {click.style(str(pa['score']), bold=True)} "
+                + click.style(f"({pa['rating']})",
+                              fg=_RATING_COLOR.get(pa['rating'])) + mark)
+        L.append("  Profiles    " + ("\n              ").join(cells))
 
     mx = checks.get("mx", {})
     hosts = [m["host"] for m in mx.get("mx_hosts", [])]
@@ -246,8 +263,11 @@ def _render_sources(svc: dict, indent: str) -> str:
 @click.option("-v", "--verbose", "verbose_opt", is_flag=True,
               help="Debug detail: records, per-MX STARTTLS, findings, "
                    "service diagnostics.")
+@click.option("--profile", "profiles_opt", multiple=True,
+              help="Conformance profile(s) to score against (repeatable). "
+                   "Default: all installed. e.g. --profile bsi_tr03182")
 @click.pass_context
-def scan(ctx, domains, list_file, as_json, quiet, verbose_opt):
+def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt):
     """Scan and assess one or more domains.
 
     Default output is a per-domain summary showing what was found and which
@@ -255,9 +275,9 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt):
     Add -v for full per-control detail and service diagnostics; --quiet for a
     single line per domain; --json for machine-readable output.
     """
-    from data.database import Database
+    from data.database import Database, DEFAULT_GUIDELINE_ID
     from scanner.orchestrator import ScanOrchestrator
-    from scanner.assessor import assess_domain
+    from scanner.assessor import assess_all_profiles, available_guidelines
 
     cfg = ctx.obj["config"]
     # -v works whether given before the subcommand (group level) or after it.
@@ -285,21 +305,35 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt):
             ", ".join(active) if active else "none (authoritative DNS + wordlist)"))
         click.echo()
 
+    gids = list(profiles_opt) or available_guidelines()
+    if DEFAULT_GUIDELINE_ID in gids:
+        primary_id = DEFAULT_GUIDELINE_ID
+    else:
+        primary_id = gids[0]
+
     run_id = db.create_run(targets, trigger="cli")
     results = []
     for d in targets:
         scan_res = orch.scan_domain(d)
         db.save_scan_result(run_id, scan_res)
-        a = assess_domain(scan_res, cfg)
-        db.save_assessment(run_id, a)
+        assessments = assess_all_profiles(scan_res, cfg, gids)
+        for gid, a in assessments.items():
+            db.save_assessment(run_id, a)
         db.bump_run_progress(run_id)
-        results.append(a)
+        primary = assessments.get(primary_id) or next(iter(assessments.values()))
+        results.append({"domain": d, "primary": primary_id,
+                        "assessments": assessments})
         if as_json:
             continue
         if quiet:
-            click.echo(f"{d:<40} {a['score']:>5}  {a['rating']}")
+            profs = "  ".join(
+                f"{gid}={pa['score']}/{pa['rating']}"
+                for gid, pa in assessments.items())
+            click.echo(f"{d:<32} {profs}")
         else:
-            click.echo(_render_scan(scan_res, a, verbose))
+            others = {g: pa for g, pa in assessments.items() if g != primary_id}
+            click.echo(_render_scan(scan_res, primary, verbose,
+                                    profiles=others or None))
             click.echo()
     db.finish_run(run_id)
     if as_json:

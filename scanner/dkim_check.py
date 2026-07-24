@@ -76,14 +76,21 @@ def _parse_dkim_record(txt: str) -> dict:
             tags[k.strip().lower()] = v.strip()
     key_type = tags.get("k", "rsa").lower()
     p = tags.get("p", "")
+    # h= is an optional colon-separated list of ACCEPTABLE hash algorithms.
+    hashes = [h.strip().lower() for h in tags.get("h", "").split(":")
+              if h.strip()]
     rec = {
         "key_type": key_type,
         "revoked": p == "",
         "testing": "y" in tags.get("t", "").lower(),
         "key_bits": None,
+        "hash_algorithms": hashes,
+        "allows_sha1": "sha1" in hashes,   # BSI TR-03182-05: SHA-1 discontinued
+        "oversized_rsa": False,            # BSI TR-03182-03: RSA must be <= 2048
     }
     if key_type == "rsa" and p:
         rec["key_bits"] = _rsa_bits_from_p(p)
+        rec["oversized_rsa"] = bool(rec["key_bits"] and rec["key_bits"] > 2048)
     elif key_type == "ed25519" and p:
         rec["key_bits"] = 256
     return rec
@@ -126,7 +133,10 @@ def check_dkim(domain: str, registered_selectors: list[str] | None = None,
     """
     dc = dns_client or DNSClient()
     out = {"control": "dkim", "present": False, "selectors": [],
-           "best_status": None, "any_testing": False, "issues": []}
+           "best_status": None, "any_testing": False,
+           # BSI TR-03182-03/04/05 algorithm-agility signals (non-revoked keys)
+           "algorithms": [], "has_rsa": False, "has_ed25519": False,
+           "any_oversized_rsa": False, "any_sha1_hash": False, "issues": []}
 
     candidates: list[tuple[str, str]] = []
     seen = set()
@@ -160,16 +170,34 @@ def check_dkim(domain: str, registered_selectors: list[str] | None = None,
                 "record": txt if len(txt) < 600 else txt[:600] + "…",
                 "key_type": rec["key_type"], "key_bits": rec["key_bits"],
                 "testing": rec["testing"], "revoked": rec["revoked"],
+                "hash_algorithms": rec["hash_algorithms"],
+                "allows_sha1": rec["allows_sha1"],
+                "oversized_rsa": rec["oversized_rsa"],
                 "status": status,
             })
             if rec["testing"]:
                 out["any_testing"] = True
             if not rec["revoked"]:
                 out["present"] = True
+                if rec["key_type"] == "ed25519":
+                    out["has_ed25519"] = True
+                elif rec["key_type"] == "rsa":
+                    out["has_rsa"] = True
+                if rec["oversized_rsa"]:
+                    out["any_oversized_rsa"] = True
+                if rec["allows_sha1"]:
+                    out["any_sha1_hash"] = True
             if (out["best_status"] is None
                     or order[status] > order[out["best_status"]]):
                 out["best_status"] = status
             break  # first TXT at this name is the key record
+
+    algs = []
+    if out["has_rsa"]:
+        algs.append("rsa")
+    if out["has_ed25519"]:
+        algs.append("ed25519")
+    out["algorithms"] = algs
 
     if not out["selectors"]:
         out["issues"].append(
@@ -184,4 +212,15 @@ def check_dkim(domain: str, registered_selectors: list[str] | None = None,
         if out["any_testing"]:
             out["issues"].append(
                 "DKIM testing flag (t=y) set — receivers may ignore signatures")
+        if out["present"] and not out["has_ed25519"]:
+            out["issues"].append(
+                "No Ed25519 (ED25519-SHA256) key alongside RSA — BSI TR-03182-04 "
+                "requires dual RSA-SHA256 + ED25519-SHA256 signing")
+        if out["any_oversized_rsa"]:
+            out["issues"].append(
+                "RSA key exceeds 2048 bit — BSI TR-03182-03 caps RSA at 2048 for "
+                "interoperability")
+        if out["any_sha1_hash"]:
+            out["issues"].append(
+                "DKIM key advertises SHA-1 (h=sha1) — discontinued (RFC 8301)")
     return out

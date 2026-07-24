@@ -1,0 +1,31 @@
+{
+  "id": "ccn_cert_bp02",
+  "name": "CCN-CERT BP/02 — Correo electronico (Spain)",
+  "url": "https://www.ccn-cert.cni.es",
+  "description": "Spanish CCN-CERT email best-practice profile. Emphasises SPF/DKIM/DMARC plus secure transport for both inbound (STARTTLS) and client-facing submission/retrieval (587/465/993/995 via RFC 6186 SRV). Much of BP/02 is end-user awareness and end-to-end encryption (PGP/S-MIME) which is not DNS-observable and is attestation-only.",
+
+  "weights": {
+    "spf": 0.20, "dkim": 0.15, "dmarc": 0.25, "starttls": 0.20,
+    "client_tls": 0.10, "dnssec": 0.10
+  },
+
+  "rating_bands": [
+    {"rating": "not_implemented", "min_score": 0,  "label": "Not implemented", "color": "#d64545"},
+    {"rating": "partial",         "min_score": 40, "label": "Partial",         "color": "#e0a030"},
+    {"rating": "compliant",       "min_score": 80, "label": "BP/02 aligned",   "color": "#3aa76d"}
+  ],
+
+  "required_signals": [
+    "spf_softfail_or_fail",
+    "dkim_present",
+    "dmarc_quarantine_or_reject",
+    "starttls_all_mx",
+    "client_tls_all"
+  ],
+
+  "attestation_only": [
+    "User-awareness / anti-phishing training (decalogo)",
+    "End-to-end message encryption and signing (PGP/GPG, S-MIME)",
+    "Client stores IMAP/POP over TLS only; no credentials cached in browser"
+  ]
+}

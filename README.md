@@ -15,11 +15,12 @@ codebase, but is a new tool with an email-security scope and a fresh database.
 
 | Control  | Standard                        | What is checked |
 |----------|---------------------------------|-----------------|
-| SPF      | RFC 7208 / SP 800-177r1 §4.4    | Record presence, `all` qualifier, lookup-limit (≤10) |
-| DKIM     | RFC 6376 / SP 800-177r1 §4.5    | Selectors (wordlist **+** per-domain registered), key type/size, testing flag |
-| DMARC    | RFC 7489 / SP 800-177r1 §4.6    | Policy, `pct`, subdomain policy, aggregate reporting |
+| SPF      | RFC 7208 / SP 800-177r1 §4.4    | Record presence, `all` qualifier + ordering, `ptr`, ip-vs-name, deny-all, lookup-limit (≤10) |
+| DKIM     | RFC 6376 / SP 800-177r1 §4.5    | Selectors (wordlist **+** per-domain registered), key type/size, RSA≤2048, Ed25519 presence, SHA-1, testing flag |
+| DMARC    | RFC 7489 / SP 800-177r1 §4.6    | Policy, `pct`, subdomain policy, strict alignment, `rua`/`ruf`, external-report domains |
 | STARTTLS | RFC 3207 / SP 800-177r1 §5.1    | Per-MX support, negotiated TLS version |
-| DNSSEC   | RFC 4033-4035 / §4.1-4.2        | DS + DNSKEY, AD-flag validation |
+| CLIENT-TLS | RFC 6186 / CCN-CERT BP/02      | Submission/retrieval TLS (587/465/993/995) discovered via SRV (n/a if not advertised) |
+| DNSSEC   | RFC 4033-4035 / §4.1-4.2        | DS + DNSKEY, AD-flag validation, `_dmarc` policy-zone AD |
 | DANE     | RFC 7672 / SP 800-177r1 §5.2    | TLSA per MX, usability (requires valid DNSSEC) |
 | MTA-STS  | RFC 8461                        | TXT record + HTTPS policy, mode, MX coverage |
 | TLS-RPT  | RFC 8460                        | Record presence, `rua` destination |
@@ -66,6 +67,37 @@ DNS:
 ```bash
 python scripts/reassess_all.py --config config/config.yaml
 ```
+
+---
+
+## Conformance profiles
+
+Beyond the default NIST SP 800-177r1 scoring, SEE-Monitor ships selectable
+national **conformance profiles**. Each is a `guidelines/<id>.json` file with
+its own control weights, rating bands, and a list of `required_signals` that
+gate the top rating (a domain can score highly yet still be *non-compliant* if
+a mandated signal is missing):
+
+| Profile id       | Standard                                             | Notable requirements |
+|------------------|------------------------------------------------------|----------------------|
+| `nist_800_177r1` | NIST SP 800-177r1 (default)                          | weighted `very_strong` |
+| `bsi_tr03182`    | BSI TR-03182 (Germany)                               | dual RSA+Ed25519 DKIM, RSA ≤2048, no SHA-1, DMARC strict alignment, **no** `ruf` (GDPR), DNSSEC, parked-domain hardening |
+| `acn_email`      | ACN Framework (Italy)                                | SPF `-all`, DMARC `p=reject`+`sp=reject`, strict alignment, `rua` **and** `ruf` |
+| `ccn_cert_bp02`  | CCN-CERT BP/02 (Spain)                               | SPF/DKIM/DMARC + STARTTLS + client submission/retrieval TLS (587/465/993/995) |
+
+A single scan is scored against every installed profile; the CLI shows all of
+them (`--profile <id>` to limit), and every web endpoint accepts
+`?guideline=<id>`.
+
+**Conflicting requirements are intentional and profile-scoped.** For example,
+ACN *requires* DMARC forensic reports (`ruf`) while BSI *forbids* them under the
+GDPR — a domain cannot satisfy both, and each profile reports its own verdict.
+
+Some requirements in these standards are **not DNS/SMTP-observable** and are
+therefore attestation-only (listed under `attestation_only` in each profile
+file) — e.g. DKIM oversigning, `Authentication-Results` insertion, DMARC report
+sending/receiving/evaluation, and organisational controls (security concept,
+GDPR processing). These are documented, not scored.
 
 ---
 
@@ -158,7 +190,7 @@ roadmap/generator.py  Per-domain and group improvement roadmaps
 reports/              CSV / JSON exporters
 auth/ admin/          Reused RBAC, login, and admin console
 scheduler/            APScheduler periodic scans
-guidelines/           NIST SP 800-177r1 scoring definition
+guidelines/           scoring profiles: nist_800_177r1 (default) + bsi_tr03182, acn_email, ccn_cert_bp02
 ```
 
 Roles: **admin** (everything), **community_manager** (their communities'
@@ -215,6 +247,17 @@ message-encryption keys, complementing the transport-level controls above:
 This would add an *end-to-end* scoring dimension separate from the transport
 controls. It is **documented here only and intentionally not implemented** in
 this release.
+
+### DKIM key-rotation history (BSI TR-03182-03)
+
+BSI TR-03182 requires DKIM key material to be renewed at least every six
+months. This cannot be judged from a single DNS snapshot — it needs the key
+material (the selector `p=` value) to be tracked over time so that a stale,
+unrotated key can be flagged. The scanner already parses key material per
+selector; a future feature would persist a per-selector key fingerprint with a
+`first_seen` timestamp and raise a finding once a key exceeds the rotation
+window. This is **documented here only and intentionally not implemented** in
+this release (no schema column is provisioned for it yet).
 
 ---
 

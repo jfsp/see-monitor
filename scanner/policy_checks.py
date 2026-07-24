@@ -115,11 +115,15 @@ def check_tlsrpt(domain: str, dns_client: DNSClient | None = None) -> dict:
 def check_dnssec(domain: str, dns_client: DNSClient | None = None) -> dict:
     dc = dns_client or DNSClient()
     out = {"control": "dnssec", "signed": False, "validated": None,
-           "ds_present": False, "dnskey_present": False, "issues": []}
+           "ds_present": False, "dnskey_present": False,
+           "dmarc_zone_ad": None, "issues": []}
     out["ds_present"] = bool(dc.query(domain, "DS"))
     out["dnskey_present"] = bool(dc.query(domain, "DNSKEY"))
     out["signed"] = out["ds_present"] and out["dnskey_present"]
     out["validated"] = dc.ad_flag(domain)
+    # BSI TR-03182: the zone publishing SPF/DKIM/DMARC policies SHOULD be
+    # DNSSEC-secured. Record the AD flag on the _dmarc policy name.
+    out["dmarc_zone_ad"] = dc.ad_flag(f"_dmarc.{domain}", rdtype="TXT")
 
     if not out["signed"]:
         if out["dnskey_present"] and not out["ds_present"]:

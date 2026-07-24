@@ -1,0 +1,41 @@
+{
+  "id": "bsi_tr03182",
+  "name": "BSI TR-03182 — Email Authentication (Germany)",
+  "url": "https://www.bsi.bund.de/dok/TR-03182",
+  "description": "German Federal Office for Information Security email-authentication conformance profile (SPF, DKIM, DMARC with strict alignment, dual RSA+Ed25519 signing, DNSSEC, STARTTLS). 'compliant' requires all externally-verifiable required_signals. Verification-side and organisational requirements (Authentication-Results, oversigning, report sending/receiving, security concept, GDPR processing) are attestation-only and out of automated scope.",
+
+  "weights": {
+    "spf": 0.15, "dkim": 0.18, "dmarc": 0.22, "starttls": 0.15,
+    "dnssec": 0.12, "dane": 0.08, "mta_sts": 0.08, "tlsrpt": 0.02
+  },
+
+  "rating_bands": [
+    {"rating": "not_implemented", "min_score": 0,  "label": "Not implemented", "color": "#d64545"},
+    {"rating": "partial",         "min_score": 40, "label": "Partial",         "color": "#e0a030"},
+    {"rating": "compliant",       "min_score": 80, "label": "TR-03182 compliant", "color": "#3aa76d"}
+  ],
+
+  "required_signals": [
+    "spf_softfail_or_fail",
+    "spf_all_last",
+    "dkim_present",
+    "dkim_ed25519",
+    "dkim_rsa_bounded",
+    "dkim_no_sha1",
+    "dmarc_quarantine_or_reject",
+    "dmarc_strict_alignment",
+    "dmarc_rua",
+    "dmarc_no_ruf",
+    "dnssec_valid",
+    "starttls_all_mx",
+    "parked_hardened"
+  ],
+
+  "attestation_only": [
+    "SPF/DKIM/DMARC verification with DNSSEC-validating resolver + Authentication-Results header (TR-03182-02/05/07)",
+    "DKIM consistent signing, oversigning, no trace-header signing (TR-03182-04)",
+    "DKIM key rotation <=6 months (TR-03182-03)",
+    "DMARC report sending / receiving / evaluating (TR-03182-08/09/10)",
+    "Security concept, data protection, mandatory reporting, transparency (TR-03182-12..15)"
+  ]
+}

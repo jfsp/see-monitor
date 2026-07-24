@@ -1,0 +1,33 @@
+{
+  "id": "acn_email",
+  "name": "ACN — Framework di Autenticazione per la Posta Elettronica (Italy)",
+  "url": "https://www.acn.gov.it",
+  "description": "Agenzia per la Cybersicurezza Nazionale email-authentication framework. Maximum-security posture: SPF -all, DMARC p=reject with sp=reject and strict alignment (adkim=s; aspf=s), aggregate AND forensic reporting (rua + ruf). Note the ruf requirement conflicts with BSI TR-03182 (GDPR) — this is intentional and profile-scoped.",
+
+  "weights": {
+    "spf": 0.20, "dkim": 0.20, "dmarc": 0.35, "starttls": 0.10,
+    "dnssec": 0.10, "mta_sts": 0.05
+  },
+
+  "rating_bands": [
+    {"rating": "not_implemented", "min_score": 0,  "label": "Not implemented", "color": "#d64545"},
+    {"rating": "partial",         "min_score": 40, "label": "Partial",         "color": "#e0a030"},
+    {"rating": "compliant",       "min_score": 80, "label": "ACN compliant",   "color": "#3aa76d"}
+  ],
+
+  "required_signals": [
+    "spf_hardfail",
+    "dkim_present",
+    "dmarc_reject",
+    "dmarc_sp_reject",
+    "dmarc_strict_alignment",
+    "dmarc_rua",
+    "dmarc_ruf"
+  ],
+
+  "attestation_only": [
+    "Sending server configured to sign with DKIM",
+    "Receiving server configured to verify SPF/DKIM and apply DMARC policy",
+    "Ongoing DMARC report monitoring"
+  ]
+}

@@ -197,6 +197,135 @@ def test_cli_scan_renderer():
     assert "detail" in debug
 
 
+def test_spf_ordering_and_denyall():
+    from scanner import spf_check
+
+    class FakeDNS:
+        def __init__(self, rec):
+            self.rec = rec
+
+        def txt(self, name):
+            return [self.rec] if name == "d.example" else []
+
+    bad = spf_check.check_spf("d.example",
+                              FakeDNS("v=spf1 -all include:x.example"))
+    assert bad["all_is_last"] is False
+    assert any("not the last" in i for i in bad["issues"])
+
+    deny = spf_check.check_spf("d.example", FakeDNS("v=spf1 -all"))
+    assert deny["deny_all"] is True
+
+    ptr = spf_check.check_spf("d.example", FakeDNS("v=spf1 ptr -all"))
+    assert ptr["uses_ptr"] is True
+
+
+def test_dkim_dual_algorithm_and_bounds():
+    from scanner import dkim_check
+
+    class FakeDNS:
+        def txt(self, name):
+            if name == "rsa._domainkey.d.example":
+                return ["v=DKIM1; k=rsa; p=" + "A" * 400]        # ~2048
+            if name == "big._domainkey.d.example":
+                return ["v=DKIM1; k=rsa; h=sha1:sha256; p=" + "A" * 720]  # >2048
+            if name == "ed._domainkey.d.example":
+                return ["v=DKIM1; k=ed25519; p=" + "B" * 43]
+            return []
+
+    r = dkim_check.check_dkim(
+        "d.example", registered_selectors=["rsa", "big", "ed"],
+        dns_client=FakeDNS(), use_wordlist=False)
+    assert r["has_rsa"] and r["has_ed25519"]
+    assert set(r["algorithms"]) == {"rsa", "ed25519"}
+    assert r["any_oversized_rsa"] is True
+    assert r["any_sha1_hash"] is True
+
+
+def test_dmarc_strict_ruf_external():
+    from scanner import dmarc_check
+
+    class FakeDNS:
+        def txt(self, name):
+            if name == "_dmarc.d.example":
+                return ["v=DMARC1; p=reject; sp=reject; adkim=s; aspf=s; "
+                        "rua=mailto:agg@thirdparty.net; ruf=mailto:f@d.example"]
+            return []
+
+    r = dmarc_check.check_dmarc("d.example", FakeDNS())
+    assert r["strict_alignment"] is True
+    assert r["has_ruf"] is True
+    assert r["external_rua_domains"] == ["thirdparty.net"]
+    assert r["external_ruf_domains"] == []       # same org
+
+
+def _profile_scan(**over):
+    """A fully-compliant scan; override individual checks to break a profile."""
+    scan = _strong_scan("p.example")
+    scan["checks"]["spf"].update(all_is_last=True, uses_ptr=False,
+                                 deny_all=False)
+    scan["checks"]["dkim"].update(has_rsa=True, has_ed25519=True,
+                                  any_oversized_rsa=False, any_sha1_hash=False)
+    scan["checks"]["dmarc"].update(strict_alignment=True, has_ruf=False,
+                                   subdomain_policy="reject")
+    for control, patch in over.items():
+        scan["checks"].setdefault(control, {}).update(patch)
+    return scan
+
+
+def test_bsi_profile_gating():
+    from scanner.assessor import assess_domain
+    ok = assess_domain(_profile_scan(), guideline_id="bsi_tr03182")
+    assert ok["compliant"] is True and ok["rating"] == "compliant"
+    # Missing Ed25519 => BSI non-compliant, demoted below the top band
+    bad = assess_domain(_profile_scan(dkim={"has_ed25519": False}),
+                        guideline_id="bsi_tr03182")
+    assert bad["compliant"] is False
+    assert bad["rating"] != "compliant"
+    assert any("Ed25519" in f["message"] for f in bad["findings"])
+
+
+def test_acn_requires_ruf_bsi_forbids_it():
+    from scanner.assessor import assess_domain
+    scan = _profile_scan(dmarc={"has_ruf": True})          # ruf present
+    acn = assess_domain(scan, guideline_id="acn_email")
+    bsi = assess_domain(scan, guideline_id="bsi_tr03182")
+    assert acn["compliance"]["dmarc_ruf"] is True          # ACN satisfied
+    assert bsi["compliance"]["dmarc_no_ruf"] is False       # BSI violated
+    assert bsi["compliant"] is False
+
+
+def test_client_tls_na_does_not_block_ccn():
+    from scanner.assessor import assess_domain
+    scan = _profile_scan()          # no client_tls key => not applicable
+    ccn = assess_domain(scan, guideline_id="ccn_cert_bp02")
+    assert ccn["control_scores"]["client_tls"] is None
+    assert ccn["compliance"]["client_tls_all"] is None      # n/a, not blocking
+    assert ccn["compliant"] is True
+
+
+def test_multiprofile_db_roundtrip():
+    from scanner.assessor import assess_domain
+    path = tempfile.mktemp(suffix=".db")
+    db = Database(path)
+    scan = _profile_scan()
+    run_id = db.create_run(["p.example"])
+    db.save_scan_result(run_id, scan)
+    for gid in ("nist_800_177r1", "bsi_tr03182", "acn_email"):
+        db.save_assessment(run_id, assess_domain(scan, guideline_id=gid))
+    db.finish_run(run_id)
+
+    assert set(db.get_guidelines_present()) >= {
+        "nist_800_177r1", "bsi_tr03182", "acn_email"}
+    # default guideline filter returns exactly one row per domain
+    nist = db.get_latest_assessments()
+    assert len(nist) == 1 and nist[0]["guideline"] == "nist_800_177r1"
+    bsi = db.get_latest_assessments(guideline="bsi_tr03182")
+    assert len(bsi) == 1 and bsi[0]["guideline"] == "bsi_tr03182"
+    # across-all view returns one row per (domain, guideline)
+    allp = db.get_latest_assessments(guideline=None)
+    assert len({a["guideline"] for a in allp}) == 3
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

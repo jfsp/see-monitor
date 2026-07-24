@@ -1,6 +1,6 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.2.0 · **Status:** functional, all tests passing · **Standard:** NIST SP 800-177r1
+**Version:** 0.3.0 · **Status:** functional, all tests passing (18) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -17,9 +17,16 @@ communities. Derived from the **pqc-monitor** codebase (multi-user model, RBAC,
 dashboards, roadmap engine, country tagging) but with an email-security scope
 and a fresh database. It is a new tool, not a fork in place.
 
-Controls scored: **SPF, DKIM, DMARC, STARTTLS, DNSSEC, DANE, MTA-STS, TLS-RPT,
-BIMI**. Ratings: `not_implemented → medium → strong → very_strong` (the last
-requires all core controls enforcing).
+Controls scored: **SPF, DKIM, DMARC, STARTTLS, CLIENT-TLS, DNSSEC, DANE,
+MTA-STS, TLS-RPT, BIMI**. NIST ratings: `not_implemented → medium → strong →
+very_strong`. National profiles rate `not_implemented → partial → compliant`,
+where `compliant` requires all of the profile's `required_signals` (independent
+of the numeric score).
+
+**Multi-profile:** every scan is assessed against all installed
+`guidelines/*.json` profiles and one assessment row is stored per profile. The
+DB query layer and web API are guideline-aware (`?guideline=<id>`); the CLI
+shows all profiles (`--profile` to limit).
 
 ---
 
@@ -32,7 +39,7 @@ requires all core controls enforcing).
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
 
-Run tests: `python3 -m pytest tests/test_smoke.py -q` (11 passing).
+Run tests: `python3 -m pytest tests/test_smoke.py -q` (18 passing).
 Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycache__*")`.
 
 ---
@@ -50,7 +57,8 @@ scanner/
   spf_check.py          record, all-qualifier, lookup counting (RFC 7208 limit)
   dkim_check.py         registered + passive + wordlist selectors; key sizing
   dmarc_check.py        policy/pct/sp/rua/alignment
-  policy_checks.py      mta_sts, tlsrpt, dnssec, dane, bimi
+  policy_checks.py      mta_sts, tlsrpt, dnssec (+_dmarc AD), dane, bimi
+  client_tls_check.py   CCN submission/retrieval TLS via RFC 6186 SRV
   starttls_probe.py     active SMTP EHLO→STARTTLS→handshake probe
   shodan_client.py      passive STARTTLS evidence (1st)
   censys_client.py      passive STARTTLS evidence (alt)
@@ -58,13 +66,15 @@ scanner/
   dnsdumpster_client.py passive DKIM selector discovery (X-API-Key)
   securitytrails_client.py passive DNS intel: MX/TXT + selector discovery (APIKEY)
   orchestrator.py       runs all checks per domain; builds scan["services"]
-  assessor.py           per-control scores + weighted rating (adjustable)
+  assessor.py           per-control scores + weighted rating; multi-profile
+                        (guideline_id), required_signals gating, assess_all_profiles
 data/
   database.py           SQLite schema v1 + full data-access API
   geo_inference.py, tld_geo.csv   country tagging (reused)
 roadmap/generator.py    per-domain + group roadmaps
 reports/report_generator.py  CSV/JSON export
-guidelines/nist_800_177r1.json  weights, rating bands, very_strong requirements
+guidelines/*.json       scoring profiles: nist_800_177r1 (default) +
+                        bsi_tr03182, acn_email, ccn_cert_bp02
 auth/ admin/ scheduler/ reused from pqc-monitor, rewired to the new DB API
 ```
 
@@ -92,10 +102,15 @@ Ops: `install.sh`, `scripts/{deploy,sync-tree,wait-for-db,fix-permissions}.sh`,
 6. **Instance state is never overwritten.** `install.sh` / `fix-permissions.sh`
    never clobber the env secrets, `config.yaml`, the DB, or the venv, and never
    re-mode `*.db*`.
-7. **Scoring is adjustable.** Weights, rating bands and the very_strong
-   enforcement requirements live in `guidelines/nist_800_177r1.json` and can be
-   overridden under `scoring:` in `config.yaml`. After changing them, run
-   `scripts/reassess_all.py` (re-scores stored scans without re-querying DNS).
+7. **Scoring is adjustable & multi-profile.** Weights, rating bands and the
+   very_strong/required_signals gating live in `guidelines/*.json`. `config.yaml`
+   `scoring:` overrides apply to the **default** guideline only (per-profile
+   JSON weights are never clobbered). After changing them, run
+   `scripts/reassess_all.py` (re-scores every profile without re-querying DNS).
+8. **Passive sources still never feed scoring** (unchanged). CLIENT-TLS and the
+   `_dmarc` AD check are active/authoritative like the rest.
+9. **Profile conflicts are intentional.** ACN requires DMARC `ruf`; BSI forbids
+   it (GDPR). Never "reconcile" them into one rule — they are per-profile.
 
 ---
 

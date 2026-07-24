@@ -143,6 +143,36 @@ def generate_domain_roadmap(assessment: dict, checks: dict | None = None) -> dic
             ["Trademark the logo and obtain a VMC",
              "Publish the default._bimi record"], "BIMI WG"))
 
+    # --- National-profile hardening (BSI / ACN / CCN deltas over NIST) ---
+    if dkim.get("present") and not dkim.get("has_ed25519"):
+        acts.append(_activity("P2", "dkim",
+            "Add an Ed25519 DKIM key (dual-sign)",
+            ["Generate an ED25519-SHA256 key and publish its selector",
+             "Dual-sign every message with RSA-SHA256 + ED25519-SHA256",
+             "Keep RSA within 1024–2048 bits; do not advertise SHA-1"],
+            "BSI TR-03182-03/04"))
+    if dkim.get("any_oversized_rsa"):
+        acts.append(_activity("P2", "dkim", "Cap DKIM RSA keys at 2048 bit",
+            ["Reissue selectors using RSA keys >2048 bit at 2048 for interop"],
+            "BSI TR-03182-03"))
+    if dmarc.get("present") and not dmarc.get("strict_alignment"):
+        acts.append(_activity("P4", "dmarc", "Enable strict DMARC alignment",
+            ["Set adkim=s and aspf=s once all senders align",
+             "Confirm no legitimate mail relies on relaxed alignment first"],
+            "BSI TR-03182-06 / ACN"))
+    if spf.get("uses_ptr"):
+        acts.append(_activity("P1", "spf", "Remove the deprecated SPF 'ptr'",
+            ["Replace ptr with explicit ip4:/ip6: ranges"],
+            "RFC 7208 §5.5"))
+    if assessment.get("no_mail") and not (
+            spf.get("deny_all") and dmarc.get("policy") == "reject"):
+        acts.append(_activity("P1", "spf",
+            "Harden this non-sending (parked) domain",
+            ["Publish 'v=spf1 -all' (authorise no sender)",
+             "Publish DMARC 'p=reject' with an rua address",
+             "Ensure a Null MX (RFC 7505) is present"],
+            "BSI TR-03182-11"))
+
     phases = []
     for pid, label in _PHASES:
         items = [a for a in acts if a["phase"] == pid]
