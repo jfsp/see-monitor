@@ -16,6 +16,7 @@ What it checks
   json           checks_json / controls_json / findings_json / domains_json /
                  roadmap_json parse as valid JSON
   values         assessments.score in [0,100]; no_mail in {0,1};
+                 confidence in {high,medium,low} (schema v3);
                  guideline is installed; rating is valid for that guideline
   operational    (info) runs stuck in 'running'; assessments with no raw scan
   data           relational hygiene: scanned domains not linked to any org;
@@ -173,7 +174,10 @@ def _check_orphans(conn, out):
 def _check_json(conn, out):
     targets = [
         ("raw_scans", "checks_json"), ("assessments", "controls_json"),
-        ("assessments", "findings_json"), ("domain_lists", "domains_json"),
+        ("assessments", "findings_json"),
+        ("assessments", "subscores_json"),
+        ("assessments", "confidence_notes_json"),
+        ("domain_lists", "domains_json"),
         ("roadmaps", "roadmap_json"),
     ]
     for table, col in targets:
@@ -245,6 +249,24 @@ def _check_assessment_values(conn, out):
                              "assessment rating not defined by its guideline's "
                              "rating_bands",
                              count=len(bad_rating), examples=bad_rating))
+
+
+def _check_confidence(conn, out):
+    """v3: assessments.confidence must be one of the three evidence levels."""
+    if not _table_exists(conn, "assessments"):
+        return
+    if "confidence" not in _cols(conn, "assessments"):
+        return
+    allowed = {"high", "medium", "low"}
+    bad = []
+    for rowid, value in conn.execute(
+            "SELECT rowid, confidence FROM assessments"):
+        if value not in allowed:
+            bad.append(f"rowid={rowid} confidence={value!r}")
+    if bad:
+        out.append(Issue("error", "values",
+                         "assessments.confidence outside {high,medium,low}",
+                         count=len(bad), examples=bad))
 
 
 def _check_operational(conn, out):
@@ -430,8 +452,8 @@ def _check_data_relations(conn, out):
 
 
 _CHECKS = [_check_structural, _check_schema_version, _check_orphans,
-           _check_json, _check_assessment_values, _check_operational,
-           _check_data_relations]
+           _check_json, _check_assessment_values, _check_confidence,
+           _check_operational, _check_data_relations]
 
 
 def run_checks(db_path: str) -> list:

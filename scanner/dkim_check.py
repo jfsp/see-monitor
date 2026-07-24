@@ -134,6 +134,12 @@ def check_dkim(domain: str, registered_selectors: list[str] | None = None,
     dc = dns_client or DNSClient()
     out = {"control": "dkim", "present": False, "selectors": [],
            "best_status": None, "any_testing": False,
+           # v0.6.0: DKIM selectors cannot be enumerated from DNS, so the
+           # absence of a wordlist hit is NOT evidence that a domain does not
+           # sign. status/confidence let the assessor score "unknown" instead
+           # of punishing a domain for using a private selector name.
+           "status": "unknown", "confidence": "low", "evidence": "none",
+           "registered_selectors": len(registered_selectors or []),
            # BSI TR-03182-03/04/05 algorithm-agility signals (non-revoked keys)
            "algorithms": [], "has_rsa": False, "has_ed25519": False,
            "any_oversized_rsa": False, "any_sha1_hash": False, "issues": []}
@@ -199,10 +205,36 @@ def check_dkim(domain: str, registered_selectors: list[str] | None = None,
         algs.append("ed25519")
     out["algorithms"] = algs
 
+    # ---- Evidence quality --------------------------------------------
+    sources = {s["source"] for s in out["selectors"]}
+    if out["selectors"]:
+        if "registered" in sources:
+            out["evidence"], out["confidence"] = "registered", "high"
+        elif sources & {"dnsdumpster", "securitytrails"}:
+            out["evidence"], out["confidence"] = "passive", "medium"
+        else:
+            out["evidence"], out["confidence"] = "wordlist", "medium"
+        out["status"] = "present" if out["present"] else "revoked"
+    elif registered_selectors:
+        # Selectors were asserted for this domain and none of them resolve:
+        # that is a genuine, high-confidence negative.
+        out["evidence"], out["confidence"] = "registered", "high"
+        out["status"] = "absent"
+    else:
+        out["evidence"], out["confidence"] = "none", "low"
+        out["status"] = "unknown"
+
     if not out["selectors"]:
-        out["issues"].append(
-            "No DKIM selectors found (wordlist + registered). If the domain "
-            "signs mail, register its selectors for accurate scoring.")
+        if out["status"] == "absent":
+            out["issues"].append(
+                "None of the registered DKIM selectors resolve — the domain "
+                "does not publish a usable DKIM key")
+        else:
+            out["issues"].append(
+                "No DKIM selectors found by wordlist or passive discovery. "
+                "Selectors are not enumerable from DNS, so this is NOT proof "
+                "that the domain does not sign — DKIM is scored as unknown. "
+                "Register the domain's selectors for a conclusive result.")
     else:
         weak = [s["selector"] for s in out["selectors"]
                 if s["status"] in ("weak", "very_weak") and not s["revoked"]]

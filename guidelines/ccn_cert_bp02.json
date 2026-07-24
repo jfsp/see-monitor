@@ -3,18 +3,37 @@
   "name": "CCN-CERT BP/02 — Correo electronico (Spain)",
   "url": "https://www.ccn-cert.cni.es",
   "description": "Spanish CCN-CERT email best-practice profile. Emphasises SPF/DKIM/DMARC plus secure transport for both inbound (STARTTLS) and client-facing submission/retrieval (587/465/993/995 via RFC 6186 SRV). Much of BP/02 is end-user awareness and end-to-end encryption (PGP/S-MIME) which is not DNS-observable and is attestation-only.",
-
   "weights": {
-    "spf": 0.20, "dkim": 0.15, "dmarc": 0.25, "starttls": 0.20,
-    "client_tls": 0.10, "dnssec": 0.10
+    "spf": 0.2,
+    "dkim": 0.15,
+    "dmarc": 0.25,
+    "starttls": 0.2,
+    "client_tls": 0.1,
+    "dnssec": 0.1,
+    "dns_hygiene": 0.06,
+    "reputation": 0.05,
+    "subdomains": 0.04
   },
-
   "rating_bands": [
-    {"rating": "not_implemented", "min_score": 0,  "label": "Not implemented", "color": "#d64545"},
-    {"rating": "partial",         "min_score": 40, "label": "Partial",         "color": "#e0a030"},
-    {"rating": "compliant",       "min_score": 80, "label": "BP/02 aligned",   "color": "#3aa76d"}
+    {
+      "rating": "not_implemented",
+      "min_score": 0,
+      "label": "Not implemented",
+      "color": "#d64545"
+    },
+    {
+      "rating": "partial",
+      "min_score": 40,
+      "label": "Partial",
+      "color": "#e0a030"
+    },
+    {
+      "rating": "compliant",
+      "min_score": 80,
+      "label": "BP/02 aligned",
+      "color": "#3aa76d"
+    }
   ],
-
   "required_signals": [
     "spf_softfail_or_fail",
     "dkim_present",
@@ -22,10 +41,27 @@
     "starttls_all_mx",
     "client_tls_all"
   ],
-
   "attestation_only": [
     "User-awareness / anti-phishing training (decalogo)",
     "End-to-end message encryption and signing (PGP/GPG, S-MIME)",
     "Client stores IMAP/POP over TLS only; no credentials cached in browser"
-  ]
+  ],
+  "controls": {
+    "dns_hygiene": {
+      "name": "DNS hygiene & resilience",
+      "ref": "RFC 2181 §10.3, RFC 8659 (CAA), RFC 9276 (NSEC3)",
+      "recommendation": "Every MX must resolve and must not be a CNAME; publish CAA; keep forward-confirmed reverse DNS on all MX addresses; use at least two nameservers from more than one provider; leave no dangling CNAME on mta-sts/autodiscover/autoconfig."
+    },
+    "reputation": {
+      "name": "Reputation (DNSBL)",
+      "ref": "Operational — Spamhaus/SpamCop/PSBL public zones",
+      "recommendation": "Neither the domain nor any MX address should be listed on a public blocklist. A listing indicates active abuse or compromise, not misconfiguration."
+    },
+    "subdomains": {
+      "name": "Subdomain coverage",
+      "ref": "RFC 7489 §6.6.3 (sp=), DMARCbis (np=)",
+      "recommendation": "Every live subdomain must be covered by an enforcing DMARC policy, inherited via sp= or published locally; no subdomain record may be weaker than the apex sp=."
+    }
+  },
+  "scoring_note": "v0.6.0: dns_hygiene, reputation and subdomains are SEE-Monitor controls, not clauses of this standard. They are weighted so that infrastructure failures affect the score, but they are deliberately absent from required_signals/very_strong_requirements, which mirror the published document only."
 }

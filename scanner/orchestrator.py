@@ -21,6 +21,10 @@ from scanner.policy_checks import (
     check_mta_sts, check_tlsrpt, check_dnssec, check_dane, check_bimi)
 from scanner.smtp_tls_check import check_starttls
 from scanner.client_tls_check import check_client_tls
+from scanner.dns_hygiene import check_dns_hygiene
+from scanner.dnsbl_check import check_dnsbl
+from scanner.subdomain_check import check_subdomains
+from scanner.crtsh_client import CrtShClient
 from scanner.shodan_client import ShodanClient
 from scanner.censys_client import CensysClient
 from scanner.dnsdumpster_client import DNSDumpsterClient
@@ -50,6 +54,19 @@ class ScanOrchestrator:
             (cfg.get("dnsdumpster") or {}).get("api_key"))
         self.securitytrails = SecurityTrailsClient(
             (cfg.get("securitytrails") or {}).get("api_key"))
+
+        # ---- v0.6.0 options ------------------------------------------
+        self.verify_mx_certs = bool(scan_cfg.get("verify_mx_certs", True))
+        self.do_fcrdns = bool(scan_cfg.get("fcrdns", True))
+        self.subdomain_scan = bool(scan_cfg.get("subdomain_check", True))
+        self.max_subdomains = int(scan_cfg.get("max_subdomains", 25))
+        self.verify_reporting = bool(scan_cfg.get("verify_reporting", True))
+        dnsbl_cfg = cfg.get("dnsbl") or {}
+        self.dnsbl_enabled = bool(dnsbl_cfg.get("enabled", True))
+        self.dnsbl_ip_zones = dnsbl_cfg.get("ip_zones")
+        self.dnsbl_domain_zones = dnsbl_cfg.get("domain_zones")
+        self.crtsh = CrtShClient(
+            enabled=bool((cfg.get("crtsh") or {}).get("enabled", True)))
 
     # ------------------------------------------------------------------
     def scan_domain(self, domain: str,
@@ -108,20 +125,57 @@ class ScanOrchestrator:
         checks["dkim"] = self._safe(
             check_dkim, domain, registered_selectors, self.dns,
             self.dkim_wordlist, passive_selectors)
-        checks["dmarc"] = self._safe(check_dmarc, domain, self.dns)
+        checks["dmarc"] = self._safe(
+            check_dmarc, domain, self.dns, self.verify_reporting)
         checks["dnssec"] = self._safe(check_dnssec, domain, self.dns)
         dnssec_valid = bool(checks["dnssec"].get("signed")
                             and checks["dnssec"].get("validated"))
-        checks["dane"] = self._safe(check_dane, mx_hosts, dnssec_valid, self.dns)
+
+        # STARTTLS runs before DANE: the certificate chain captured by that
+        # single connection is what makes live TLSA matching possible without
+        # opening another one.
+        checks["starttls"] = self._safe(
+            check_starttls, mx_hosts, self.shodan, self.censys,
+            self.active_smtp, self.timeout, self.verify_mx_certs)
+        chains = checks["starttls"].pop("_chains", {}) or {}
+
+        checks["dane"] = self._safe(
+            check_dane, mx_hosts, dnssec_valid, self.dns, chains)
         checks["mta_sts"] = self._safe(
             check_mta_sts, domain, mx_hosts, self.dns, self.timeout)
         checks["tlsrpt"] = self._safe(check_tlsrpt, domain, self.dns)
-        checks["starttls"] = self._safe(
-            check_starttls, mx_hosts, self.shodan, self.censys,
-            self.active_smtp, self.timeout)
         checks["client_tls"] = self._safe(
             check_client_tls, domain, self.dns, self.active_smtp, self.timeout)
-        checks["bimi"] = self._safe(check_bimi, domain, self.dns)
+        checks["bimi"] = self._safe(
+            check_bimi, domain, self.dns, checks["dmarc"])
+
+        # ---- DNS hygiene, reputation, subdomain coverage --------------
+        checks["dns_hygiene"] = self._safe(
+            check_dns_hygiene, domain, mx_hosts, self.dns, self.do_fcrdns)
+        mx_ips = checks["dns_hygiene"].get("mx_ips", []) or []
+        checks["reputation"] = self._safe(
+            check_dnsbl, domain, mx_ips, self.dns, self.dnsbl_ip_zones,
+            self.dnsbl_domain_zones, self.dnsbl_enabled)
+
+        sub_candidates: list[str] = []
+        ct_count = 0
+        ct_error = None
+        if self.subdomain_scan:
+            if self.crtsh.available:
+                try:
+                    found = self.crtsh.discover_subdomains(domain)
+                    ct_count = len(found)
+                    sub_candidates += found
+                except Exception as exc:
+                    ct_error = str(exc)
+            for name in st_intel.get("mail_hosts", []) or []:
+                if name not in sub_candidates:
+                    sub_candidates.append(name)
+        dmarc_res = checks["dmarc"]
+        inherited = dmarc_res.get("subdomain_policy") or dmarc_res.get("policy")
+        checks["subdomains"] = self._safe(
+            check_subdomains, domain, sub_candidates, inherited, self.dns,
+            self.max_subdomains, self.subdomain_scan)
 
         # Persist newly discovered wordlist selectors so future scans keep them
         if self.db is not None:
@@ -153,6 +207,8 @@ class ScanOrchestrator:
                             "mx_total": mx_total},
             "dnsdumpster": {"available": self.dnsdumpster.available,
                             "selectors": dd_count, "error": dd_error},
+            "crtsh": {"available": self.crtsh.available,
+                      "subdomains": ct_count, "error": ct_error},
             "securitytrails": {"available": self.securitytrails.available,
                                "mx": len(st_intel.get("mx", [])),
                                "selectors": len(st_intel.get("selectors", [])),

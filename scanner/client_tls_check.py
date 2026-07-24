@@ -36,6 +36,14 @@ from scanner.starttls_probe import _recv_multiline, _WEAK_TLS
 logger = logging.getLogger(__name__)
 
 # service -> (SRV name, default port, mode)   mode: "starttls" | "implicit"
+# Conventional client-endpoint names. Almost no domain publishes RFC 6186 SRV
+# records, so SRV-only discovery makes this control n/a nearly everywhere. The
+# presence of these names is DNS-observable and is reported as ATTACK SURFACE;
+# their TLS posture is not probed here (that needs connections to submission/
+# IMAP/POP ports — see README "Future features").
+_CONVENTIONAL_NAMES = ["mail", "smtp", "imap", "pop", "pop3", "webmail",
+                       "autodiscover", "autoconfig", "owa", "exchange"]
+
 _SRV_SERVICES = {
     "submission":  ("_submission._tcp",  587, "starttls"),
     "submissions": ("_submissions._tcp", 465, "implicit"),
@@ -150,7 +158,20 @@ def check_client_tls(domain: str, dns_client: DNSClient | None = None,
     out = {"control": "client_tls", "applicable": False, "services": {},
            "advertised": [], "tls_ok_count": 0, "advertised_count": 0,
            "all_tls": False, "any_weak_tls": False,
+           # v0.6.0: passive discovery of conventional client endpoints
+           "conventional_hosts": [], "autodiscover": False,
+           "autoconfig": False, "srv_published": False,
            "checked_at": datetime.now(timezone.utc).isoformat(), "issues": []}
+
+    for label in _CONVENTIONAL_NAMES:
+        name = f"{label}.{domain}"
+        if dc.query(name, "A") or dc.query(name, "AAAA") \
+                or dc.query(name, "CNAME"):
+            out["conventional_hosts"].append(name)
+            if label == "autodiscover":
+                out["autodiscover"] = True
+            elif label == "autoconfig":
+                out["autoconfig"] = True
 
     discovered = {}
     for name, (srv, _port, mode) in _SRV_SERVICES.items():
@@ -162,8 +183,21 @@ def check_client_tls(domain: str, dns_client: DNSClient | None = None,
         out["issues"].append(
             "No RFC 6186 SRV records (_submission/_imaps/_pop3s) — client "
             "TLS posture not DNS-advertised (n/a)")
+        if out["conventional_hosts"]:
+            out["issues"].append(
+                "Client mail endpoints exist under conventional names ("
+                + ", ".join(out["conventional_hosts"])
+                + ") but publish no RFC 6186 SRV records: clients must be "
+                  "configured manually, and their TLS enforcement cannot be "
+                  "verified without connecting to submission/IMAP/POP ports")
+        if out["autodiscover"]:
+            out["issues"].append(
+                f"autodiscover.{domain} is published — verify it is not a "
+                "stale CNAME to a third party; Autodiscover endpoints have "
+                "been used to harvest client credentials")
         return out
 
+    out["srv_published"] = True
     out["applicable"] = True
     out["advertised"] = sorted(discovered)
     out["advertised_count"] = len(discovered)

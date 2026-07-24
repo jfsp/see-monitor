@@ -3,71 +3,118 @@
   "name": "NIST SP 800-177 Rev. 1 — Trustworthy Email",
   "url": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-177r1.pdf",
   "description": "Email security control scoring derived from NIST SP 800-177r1 recommendations. Weights and rating bands are adjustable here or overridden via config.yaml (scoring:).",
-
   "weights": {
-    "spf":      0.15,
-    "dkim":     0.15,
-    "dmarc":    0.20,
+    "spf": 0.15,
+    "dkim": 0.15,
+    "dmarc": 0.2,
     "starttls": 0.15,
-    "dnssec":   0.10,
-    "dane":     0.08,
-    "mta_sts":  0.10,
-    "tlsrpt":   0.04,
-    "bimi":     0.03
+    "dnssec": 0.1,
+    "dane": 0.08,
+    "mta_sts": 0.1,
+    "tlsrpt": 0.04,
+    "bimi": 0.03,
+    "dns_hygiene": 0.08,
+    "reputation": 0.06,
+    "subdomains": 0.06
   },
-
   "rating_bands": [
-    {"rating": "not_implemented", "min_score": 0,  "label": "Not implemented / Weak", "color": "#d64545"},
-    {"rating": "medium",          "min_score": 30, "label": "Medium",                 "color": "#e0a030"},
-    {"rating": "strong",          "min_score": 60, "label": "Strong",                 "color": "#4a90d9"},
-    {"rating": "very_strong",     "min_score": 85, "label": "Very strong",            "color": "#3aa76d"}
+    {
+      "rating": "not_implemented",
+      "min_score": 0,
+      "label": "Not implemented / Weak",
+      "color": "#d64545"
+    },
+    {
+      "rating": "medium",
+      "min_score": 30,
+      "label": "Medium",
+      "color": "#e0a030"
+    },
+    {
+      "rating": "strong",
+      "min_score": 60,
+      "label": "Strong",
+      "color": "#4a90d9"
+    },
+    {
+      "rating": "very_strong",
+      "min_score": 85,
+      "label": "Very strong",
+      "color": "#3aa76d"
+    }
   ],
-
   "very_strong_requirements": {
     "description": "In addition to the score threshold, 'very_strong' requires all core controls in enforcing mode.",
     "spf_all_qualifier": "-",
     "dmarc_policy": "reject",
     "dkim_min_status": "strong",
     "starttls_all_mx": true,
-    "channel_enforcement_any_of": ["mta_sts_enforce", "dane_full"]
+    "channel_enforcement_any_of": [
+      "mta_sts_enforce",
+      "dane_full"
+    ]
   },
-
   "controls": {
     "spf": {
-      "name": "SPF", "ref": "SP 800-177r1 §4.4 / RFC 7208",
+      "name": "SPF",
+      "ref": "SP 800-177r1 §4.4 / RFC 7208",
       "recommendation": "Publish an SPF record ending in '-all'; keep DNS-querying mechanisms <= 10."
     },
     "dkim": {
-      "name": "DKIM", "ref": "SP 800-177r1 §4.5 / RFC 6376",
+      "name": "DKIM",
+      "ref": "SP 800-177r1 §4.5 / RFC 6376",
       "recommendation": "Sign outbound mail with DKIM using RSA >= 2048 bits or Ed25519; remove testing flag."
     },
     "dmarc": {
-      "name": "DMARC", "ref": "SP 800-177r1 §4.6 / RFC 7489",
+      "name": "DMARC",
+      "ref": "SP 800-177r1 §4.6 / RFC 7489",
       "recommendation": "Publish DMARC with p=reject (pct=100) and aggregate reporting (rua)."
     },
     "starttls": {
-      "name": "STARTTLS", "ref": "SP 800-177r1 §5.1 / RFC 3207",
+      "name": "STARTTLS",
+      "ref": "SP 800-177r1 §5.1 / RFC 3207",
       "recommendation": "All MX hosts must offer STARTTLS with TLS >= 1.2."
     },
     "dnssec": {
-      "name": "DNSSEC", "ref": "SP 800-177r1 §4.1-4.2 / RFC 4033-4035",
+      "name": "DNSSEC",
+      "ref": "SP 800-177r1 §4.1-4.2 / RFC 4033-4035",
       "recommendation": "Sign the zone with DNSSEC; ensure DS records at the parent validate."
     },
     "dane": {
-      "name": "DANE/TLSA", "ref": "SP 800-177r1 §5.2 / RFC 7672",
+      "name": "DANE/TLSA",
+      "ref": "SP 800-177r1 §5.2 / RFC 7672",
       "recommendation": "Publish TLSA records for every MX host (requires valid DNSSEC)."
     },
     "mta_sts": {
-      "name": "MTA-STS", "ref": "RFC 8461 (complements SP 800-177r1 §5)",
+      "name": "MTA-STS",
+      "ref": "RFC 8461 (complements SP 800-177r1 §5)",
       "recommendation": "Publish an MTA-STS policy in enforce mode covering all MX hosts."
     },
     "tlsrpt": {
-      "name": "TLS-RPT", "ref": "RFC 8460",
+      "name": "TLS-RPT",
+      "ref": "RFC 8460",
       "recommendation": "Publish a TLS-RPT record (_smtp._tls) to receive transport failure reports."
     },
     "bimi": {
-      "name": "BIMI", "ref": "draft-brand-indicators (industry practice, not NIST)",
+      "name": "BIMI",
+      "ref": "draft-brand-indicators (industry practice, not NIST)",
       "recommendation": "Optional: publish a BIMI record with a Verified Mark Certificate. Requires DMARC at enforcement."
+    },
+    "dns_hygiene": {
+      "name": "DNS hygiene & resilience",
+      "ref": "RFC 2181 §10.3, RFC 8659 (CAA), RFC 9276 (NSEC3)",
+      "recommendation": "Every MX must resolve and must not be a CNAME; publish CAA; keep forward-confirmed reverse DNS on all MX addresses; use at least two nameservers from more than one provider; leave no dangling CNAME on mta-sts/autodiscover/autoconfig."
+    },
+    "reputation": {
+      "name": "Reputation (DNSBL)",
+      "ref": "Operational — Spamhaus/SpamCop/PSBL public zones",
+      "recommendation": "Neither the domain nor any MX address should be listed on a public blocklist. A listing indicates active abuse or compromise, not misconfiguration."
+    },
+    "subdomains": {
+      "name": "Subdomain coverage",
+      "ref": "RFC 7489 §6.6.3 (sp=), DMARCbis (np=)",
+      "recommendation": "Every live subdomain must be covered by an enforcing DMARC policy, inherited via sp= or published locally; no subdomain record may be weaker than the apex sp=."
     }
-  }
+  },
+  "scoring_note": "v0.6.0: dns_hygiene, reputation and subdomains are SEE-Monitor controls, not clauses of this standard. They are weighted so that infrastructure failures affect the score, but they are deliberately absent from required_signals/very_strong_requirements, which mirror the published document only."
 }

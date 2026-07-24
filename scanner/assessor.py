@@ -74,6 +74,9 @@ def _sig(checks: dict, no_mail: bool):
     dnssec = checks.get("dnssec", {})
     starttls = checks.get("starttls", {})
     client = checks.get("client_tls", {})
+    hygiene = checks.get("dns_hygiene", {})
+    reputation = checks.get("reputation", {})
+    subs = checks.get("subdomains", {})
 
     def dmarc_ok():
         return dmarc.get("present") and dmarc.get("valid")
@@ -116,6 +119,33 @@ def _sig(checks: dict, no_mail: bool):
         else bool(starttls.get("all_starttls")),
         "client_tls_all": None if not client.get("applicable")
         else bool(client.get("all_tls")),
+        # v0.6.0 signals
+        "dmarc_np_reject": (dmarc.get("np_policy") == "reject")
+        if dmarc_ok() else False,
+        "dmarc_own_record": (not dmarc.get("inherited"))
+        if dmarc.get("present") else False,
+        "spf_void_ok": (not spf.get("exceeds_void_limit"))
+        if spf.get("present") else None,
+        "dkim_confirmed": None if dkim.get("status") == "unknown"
+        else bool(dkim.get("present")),
+        "mx_cert_valid": None if not starttls.get("hosts")
+        else not (starttls.get("any_cert_invalid")
+                  or starttls.get("any_cert_hostname_mismatch")),
+        "no_cleartext_auth": (not starttls.get("any_auth_before_tls"))
+        if starttls.get("hosts") else None,
+        "no_dangling_dns": (not hygiene.get("takeover_risks")
+                            and not hygiene.get("dangling_mx"))
+        if hygiene else None,
+        "caa_present": bool((hygiene.get("caa") or {}).get("present"))
+        if hygiene else None,
+        "fcrdns_ok": hygiene.get("fcrdns_ok") if hygiene else None,
+        "not_blocklisted": None if (not reputation.get("applicable")
+                                    or reputation.get("any_blocked"))
+        else not reputation.get("any_listed"),
+        "subdomains_covered": None if not subs.get("applicable")
+        else (subs.get("coverage") or 0) >= 0.95,
+        "dane_matches": None if not checks.get("dane", {}).get("match_checked")
+        else not checks.get("dane", {}).get("mismatched_mx"),
         # Parked / non-sending domains (BSI TR-03182-11)
         "parked_hardened": (bool(spf.get("deny_all"))
                             and dmarc.get("policy") == "reject")
@@ -144,6 +174,18 @@ _SIGNAL_LABELS = {
     "starttls_all_mx": "All MX hosts must offer STARTTLS",
     "client_tls_all": "Submission/retrieval services must enforce TLS",
     "parked_hardened": "Parked domain must publish 'v=spf1 -all' and DMARC reject",
+    "dmarc_np_reject": "DMARC should publish np=reject for non-existent subdomains",
+    "dmarc_own_record": "Domain should publish its own DMARC record",
+    "spf_void_ok": "SPF must stay within the RFC 7208 void-lookup limit",
+    "dkim_confirmed": "DKIM signing must be confirmed (register selectors)",
+    "mx_cert_valid": "MX certificates must be valid and match the MX hostname",
+    "no_cleartext_auth": "SMTP AUTH must not be offered before STARTTLS",
+    "no_dangling_dns": "No dangling MX or service CNAMEs (takeover exposure)",
+    "caa_present": "A CAA record should constrain certificate issuance",
+    "fcrdns_ok": "MX addresses must have forward-confirmed reverse DNS",
+    "not_blocklisted": "MX addresses and domain must not be blocklisted",
+    "subdomains_covered": "Subdomains must be covered by an enforcing DMARC policy",
+    "dane_matches": "Published TLSA records must match the presented certificate",
 }
 
 
@@ -164,7 +206,12 @@ def _score_spf(c: dict) -> int:
     return base
 
 
-def _score_dkim(c: dict) -> int:
+def _score_dkim(c: dict) -> int | None:
+    # Selectors are not enumerable from DNS. When nothing was found and no
+    # selector was ever registered for the domain, we have no evidence either
+    # way and must not score the control at all.
+    if c.get("status") == "unknown":
+        return None
     status = c.get("best_status")
     if not c.get("present") or status is None:
         return 0
@@ -242,17 +289,35 @@ def _score_tlsrpt(c: dict) -> int:
 def _score_starttls(c: dict) -> int | None:
     if not c.get("applicable"):
         return None
+    known = c.get("supported_count", 0) + c.get("no_tls_count", 0)
+    if known == 0:
+        return None                     # nothing could be determined
     if c.get("supported_count", 0) == 0:
-        return 0
-    base = 100 if c.get("all_starttls") else 50
+        base = 0
+    elif c.get("supported_count", 0) == known and not c.get("unknown_count"):
+        base = 100
+    else:
+        base = round(100 * c["supported_count"] / known)
+        base = min(base, 90)            # partial or partly unknown coverage
     if c.get("any_weak_tls"):
         base = min(base, 60)
+    # A certificate that cannot be validated or does not match the MX name
+    # means MTA-STS enforce and RFC 8689 strict transport would both fail.
+    if c.get("any_cert_hostname_mismatch") or c.get("any_cert_invalid"):
+        base = min(base, 55)
+    if c.get("any_auth_before_tls"):
+        base = min(base, 70)
     return base
 
 
-def _score_bimi(c: dict) -> int:
+def _score_bimi(c: dict) -> int | None:
+    # BIMI is optional and cosmetic. Scoring its absence as a failure punishes
+    # domains for not buying a mark certificate, so absence is n/a and only a
+    # published record is scored.
     if not c.get("present"):
-        return 0
+        return None
+    if c.get("prerequisite_met") is False:
+        return 30
     return 100 if c.get("vmc_url") else 70
 
 
@@ -270,12 +335,125 @@ def _score_client_tls(c: dict) -> int | None:
     return base
 
 
+def _score_dns_hygiene(c: dict) -> int | None:
+    if not c:
+        return None
+    score = 100
+    if c.get("dangling_mx"):
+        score -= 40
+    if c.get("takeover_risks"):
+        score -= 40
+    if c.get("mx_is_cname"):
+        score -= 15
+    if c.get("fcrdns_ok") is False:
+        score -= 15
+    if not (c.get("caa") or {}).get("present"):
+        score -= 10
+    if c.get("ipv6_ready") is False:
+        score -= 5
+    ns = c.get("nameservers") or []
+    if ns and len(ns) < 2:
+        score -= 15
+    elif c.get("ns_diverse") is False:
+        score -= 10
+    return max(0, score)
+
+
+def _score_reputation(c: dict) -> int | None:
+    if not c or not c.get("enabled") or not c.get("applicable"):
+        return None
+    if c.get("any_blocked") and not c.get("any_listed"):
+        # The blocklists refused our queries: a clean result is unverifiable.
+        return None
+    if c.get("any_listed"):
+        return 0
+    return 100
+
+
+def _score_subdomains(c: dict) -> int | None:
+    if not c or not c.get("applicable") or not c.get("live"):
+        return None
+    coverage = c.get("coverage")
+    if coverage is None:
+        return None
+    score = round(coverage * 100)
+    if c.get("weaker_policy"):
+        score = min(score, 60)
+    return score
+
+
 _SCORERS = {
     "spf": _score_spf, "dkim": _score_dkim, "dmarc": _score_dmarc,
     "dnssec": _score_dnssec, "dane": _score_dane, "mta_sts": _score_mta_sts,
     "tlsrpt": _score_tlsrpt, "starttls": _score_starttls, "bimi": _score_bimi,
     "client_tls": _score_client_tls,
+    "dns_hygiene": _score_dns_hygiene, "reputation": _score_reputation,
+    "subdomains": _score_subdomains,
 }
+
+# Controls whose findings are always surfaced, whatever the active profile
+# weights. A dangling MX or a blocklisted mail server matters to a BSI reader
+# just as much as to a NIST one.
+_ALWAYS_REPORT = {"spf", "dkim", "dmarc", "dns_hygiene", "reputation",
+                  "subdomains", "starttls"}
+
+
+# ----------------------------------------------------------------------
+# Sub-scores: orthogonal views over the same control set
+# ----------------------------------------------------------------------
+_SUBSCORE_WEIGHTS = {
+    # How hard is it to send mail that appears to come from this domain?
+    "impersonation": {"spf": 0.25, "dkim": 0.2, "dmarc": 0.35,
+                      "subdomains": 0.2},
+    # Is mail to and from this domain protected in transit?
+    "transport": {"starttls": 0.4, "mta_sts": 0.25, "dane": 0.2,
+                  "tlsrpt": 0.05, "client_tls": 0.1},
+    # Is the infrastructure the controls depend on sound?
+    "resilience": {"dnssec": 0.35, "dns_hygiene": 0.4, "reputation": 0.25},
+}
+
+
+def _weighted(scores: dict, weights: dict) -> float | None:
+    num = den = 0.0
+    for control, weight in weights.items():
+        score = scores.get(control)
+        if score is None:
+            continue
+        num += weight * score
+        den += weight
+    return round(num / den, 1) if den > 0 else None
+
+
+def _confidence(checks: dict, control_scores: dict) -> tuple:
+    """Overall evidence quality, independent of the score itself."""
+    notes = []
+    if checks.get("dkim", {}).get("status") == "unknown":
+        notes.append(
+            "DKIM not confirmed: no selector found and none registered")
+    st = checks.get("starttls", {})
+    if st.get("unknown_count"):
+        notes.append(
+            f"STARTTLS unknown on {st['unknown_count']} of {st.get('total')} "
+            "MX host(s)")
+    if checks.get("reputation", {}).get("any_blocked"):
+        notes.append("Blocklist queries were refused — reputation unverified")
+    if checks.get("dnssec", {}).get("validated") is None \
+            and checks.get("dnssec", {}).get("signed"):
+        notes.append("DNSSEC validation could not be confirmed")
+    dane = checks.get("dane", {})
+    if dane.get("mx_with_tlsa") and not dane.get("match_checked"):
+        notes.append("TLSA records could not be matched against a live "
+                     "certificate")
+    if checks.get("subdomains", {}).get("truncated"):
+        notes.append("Subdomain coverage sampled, not exhaustive")
+    scored = sum(1 for v in control_scores.values() if v is not None)
+    if not scored:
+        return "low", notes + ["No control could be scored"]
+    if len(notes) >= 3:
+        return "low", notes
+    if notes:
+        return "medium", notes
+    return "high", notes
 
 
 # ----------------------------------------------------------------------
@@ -338,8 +516,7 @@ def assess_domain(scan: dict, config: dict | None = None,
         control_scores[control] = score
         # Only surface issues for controls this profile actually weighs, so a
         # BSI report is not cluttered with (unweighted) BIMI notes, etc.
-        if float(weights.get(control, 0)) <= 0 and control not in (
-                "spf", "dkim", "dmarc"):
+        if float(weights.get(control, 0)) <= 0 and control not in _ALWAYS_REPORT:
             continue
         for issue in c.get("issues", []):
             sev = "info"
@@ -363,6 +540,10 @@ def assess_domain(scan: dict, config: dict | None = None,
         num += w * score
         den += w
     total = round(num / den, 1) if den > 0 else 0.0
+
+    subscores = {name: _weighted(control_scores, w)
+                 for name, w in _SUBSCORE_WEIGHTS.items()}
+    confidence, confidence_notes = _confidence(checks, control_scores)
 
     bands = sorted(guideline["rating_bands"], key=lambda b: b["min_score"])
     rating = bands[0]["rating"] if bands else "not_implemented"
@@ -404,6 +585,11 @@ def assess_domain(scan: dict, config: dict | None = None,
         "compliance": compliance,
         "compliant": compliant,
         "no_mail": no_mail,
+        # v0.6.0: orthogonal views and evidence quality. Sub-scores are
+        # profile-independent — they describe the domain, not its compliance.
+        "subscores": subscores,
+        "confidence": confidence,
+        "confidence_notes": confidence_notes,
     }
 
 

@@ -75,11 +75,14 @@ def init_db(ctx):
 
 
 _CONTROLS = ["spf", "dkim", "dmarc", "starttls", "dnssec", "dane",
-             "mta_sts", "tlsrpt", "bimi", "client_tls"]
+             "mta_sts", "tlsrpt", "bimi", "client_tls",
+             "dns_hygiene", "reputation", "subdomains"]
 _CTRL_LABEL = {"spf": "SPF", "dkim": "DKIM", "dmarc": "DMARC",
                "starttls": "STARTTLS", "dnssec": "DNSSEC", "dane": "DANE",
                "mta_sts": "MTA-STS", "tlsrpt": "TLS-RPT", "bimi": "BIMI",
-               "client_tls": "CLIENT-TLS"}
+               "client_tls": "CLIENT-TLS", "dns_hygiene": "DNS-HYG",
+               "reputation": "REPUTATION", "subdomains": "SUBDOMAINS"}
+_CONFIDENCE_COLOR = {"high": "green", "medium": "yellow", "low": "red"}
 _RATING_COLOR = {"not_implemented": "red", "medium": "yellow",
                  "strong": "cyan", "very_strong": "green",
                  "partial": "yellow", "compliant": "green"}
@@ -106,8 +109,20 @@ def _render_scan(scan: dict, a: dict, verbose: bool,
              + click.style(bar[len(a['domain']) + 4:], fg="bright_black"))
 
     rating = a["rating"]
+    conf = a.get("confidence", "high")
     L.append(f"  Score       {click.style(str(a['score']), bold=True)} / 100   "
-             + click.style(f"({rating})", fg=_RATING_COLOR.get(rating)))
+             + click.style(f"({rating})", fg=_RATING_COLOR.get(rating))
+             + "   evidence: "
+             + click.style(conf, fg=_CONFIDENCE_COLOR.get(conf)))
+
+    subs = a.get("subscores") or {}
+    if any(v is not None for v in subs.values()):
+        cells = []
+        for name in ("impersonation", "transport", "resilience"):
+            val = subs.get(name)
+            cells.append(f"{name} " + ("n/a" if val is None
+                                       else click.style(str(val), bold=True)))
+        L.append("  Sub-scores  " + "   ".join(cells))
 
     # Per-profile scores (national conformance profiles)
     if profiles:
@@ -137,8 +152,9 @@ def _render_scan(scan: dict, a: dict, verbose: bool,
     cells = [f"{_glyph(cs.get(c))} {_CTRL_LABEL[c]}"
              f"{'' if cs.get(c) is None else ' ' + str(cs.get(c))}"
              for c in _CONTROLS]
-    L.append("  Controls    " + "   ".join(cells[:4]))
-    L.append("              " + "   ".join(cells[4:]))
+    for start in range(0, len(cells), 4):
+        prefix = "  Controls    " if start == 0 else "              "
+        L.append(prefix + "   ".join(cells[start:start + 4]))
 
     findings = a.get("findings", [])
     if findings:
@@ -149,6 +165,9 @@ def _render_scan(scan: dict, a: dict, verbose: bool,
                  + click.style(f"{sev['critical']} critical", fg='red') + " · "
                  + click.style(f"{sev['warning']} warning", fg='yellow') + " · "
                  + f"{sev['info']} info)")
+
+    for note in (a.get("confidence_notes") or [])[:4]:
+        L.append(click.style(f"  Evidence    {note}", fg="bright_black"))
 
     # External sources
     L.append("  Sources     " + _render_sources(svc, indent="              "))

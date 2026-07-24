@@ -18,7 +18,22 @@ from scanner.dns_client import DNSClient
 logger = logging.getLogger(__name__)
 
 MAX_LOOKUPS = 10
+# RFC 7208 §4.6.4: at most two "void" lookups (NXDOMAIN / empty answer) are
+# permitted before the evaluation is a permerror. Dangling include: targets
+# are common and blow this limit long before the 10-lookup ceiling is reached.
+MAX_VOID_LOOKUPS = 2
 _QUALIFIERS = {"+": "pass", "-": "fail", "~": "softfail", "?": "neutral"}
+
+# Shared, multi-tenant sending platforms. Including one of these authorises
+# every customer of that platform to send as the domain unless the platform
+# additionally enforces per-tenant alignment. Reported, never auto-failed.
+_MULTI_TENANT = {
+    "sendgrid.net", "spf.protection.outlook.com", "_spf.google.com",
+    "mailgun.org", "spf.mandrillapp.com", "servers.mcsv.net",
+    "amazonses.com", "spf.mailjet.com", "sendinblue.com", "zoho.com",
+    "mktomail.com", "spf.constantcontact.com", "salesforce.com",
+    "helpscoutemail.com", "mail.zendesk.com", "spf.sendpulse.com",
+}
 
 
 def _get_spf_records(domain: str, dc: DNSClient) -> list[str]:
@@ -30,30 +45,79 @@ def _get_spf_records(domain: str, dc: DNSClient) -> list[str]:
         return []
 
 
-def _count_lookups(record: str, domain: str, dc: DNSClient,
-                   seen: set, depth: int = 0) -> int:
-    """Count DNS-querying terms, recursing into include:/redirect=."""
-    if depth > 10 or domain in seen:
+def _addr_count(term: str) -> int:
+    """Number of addresses authorised by an ip4:/ip6: term (0 if unparsable)."""
+    import ipaddress
+    value = term.split(":", 1)[1] if ":" in term else ""
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+    except ValueError:
         return 0
-    seen.add(domain)
-    count = 0
+    return net.num_addresses
+
+
+def _resolves(name: str, dc: DNSClient, rdtypes=("A", "AAAA")) -> bool:
+    return any(dc.query(name, rd) for rd in rdtypes)
+
+
+def _traverse(record: str, domain: str, dc: DNSClient, state: dict,
+              depth: int = 0) -> None:
+    """
+    Walk the SPF record, recursing into include:/redirect=, accumulating:
+      lookups        DNS-querying mechanisms (RFC 7208 §4.6.4 limit: 10)
+      void           lookups returning NXDOMAIN / no answer (limit: 2)
+      dangling       include/redirect targets with no usable SPF record
+      addresses      total IPv4+IPv6 addresses authorised
+      multi_tenant   shared sending platforms authorised
+      macros         terms using RFC 7208 macro expansion
+    """
+    if depth > 10 or domain in state["seen"]:
+        return
+    state["seen"].add(domain)
+
     for term in record.split()[1:]:
-        t = term.lstrip("+-~?").lower()
-        if t.startswith(("include:", "exists:")) or t in ("a", "mx", "ptr") \
-                or t.startswith(("a:", "a/", "mx:", "mx/", "ptr:")):
-            count += 1
+        raw = term.lstrip("+-~?")
+        t = raw.lower()
+
+        if "%{" in t:
+            state["macros"].append(term)
+
+        if t.startswith(("ip4:", "ip6:")):
+            state["addresses"] += _addr_count(t)
+            continue
+
+        if t.startswith("include:") or t.startswith("redirect="):
+            sep = ":" if t.startswith("include:") else "="
+            target = raw.split(sep, 1)[1].strip().rstrip(".").lower()
+            state["lookups"] += 1
             if t.startswith("include:"):
-                target = term.split(":", 1)[1]
-                sub = _get_spf_records(target, dc)
-                if sub:
-                    count += _count_lookups(sub[0], target, dc, seen, depth + 1)
-        elif t.startswith("redirect="):
-            count += 1
-            target = term.split("=", 1)[1]
+                base = target
+                for known in _MULTI_TENANT:
+                    if base == known or base.endswith("." + known):
+                        if known not in state["multi_tenant"]:
+                            state["multi_tenant"].append(known)
+                        break
             sub = _get_spf_records(target, dc)
-            if sub:
-                count += _count_lookups(sub[0], target, dc, seen, depth + 1)
-    return count
+            if not sub:
+                state["void"] += 1
+                if target not in state["dangling"]:
+                    state["dangling"].append(target)
+                continue
+            _traverse(sub[0], target, dc, state, depth + 1)
+            continue
+
+        if t in ("a", "mx", "ptr") or t.startswith(("a:", "a/", "mx:", "mx/",
+                                                    "ptr:", "exists:")):
+            state["lookups"] += 1
+            # Only explicit-domain forms are re-resolved; the bare a/mx forms
+            # refer to the current domain, which we already know resolves.
+            if ":" in t and not t.startswith("ptr"):
+                target = raw.split(":", 1)[1].split("/", 1)[0].strip().rstrip(".")
+                rdtypes = ("MX",) if t.startswith("mx:") else ("A", "AAAA")
+                if target and not _resolves(target, dc, rdtypes):
+                    state["void"] += 1
+                    if target not in state["dangling"]:
+                        state["dangling"].append(target)
 
 
 def check_spf(domain: str, dns_client: DNSClient | None = None) -> dict:
@@ -75,7 +139,13 @@ def check_spf(domain: str, dns_client: DNSClient | None = None) -> dict:
            # BSI TR-03182-01 / ACN notational + hardfail signals
            "all_is_last": None, "uses_ptr": False,
            "ip_mechanisms": 0, "name_mechanisms": 0, "mostly_ip": None,
-           "deny_all": False, "issues": []}
+           "deny_all": False,
+           # v0.6.0: RFC 7208 §4.6.4 void limit, dangling targets, breadth of
+           # the authorised sender space, shared-platform includes, macros.
+           "void_lookups": 0, "exceeds_void_limit": False,
+           "dangling_targets": [], "authorised_addresses": 0,
+           "multi_tenant_includes": [], "macros": [], "has_exp": False,
+           "issues": []}
 
     records = _get_spf_records(domain, dc)
     out["records"] = records
@@ -141,10 +211,49 @@ def check_spf(domain: str, dns_client: DNSClient | None = None) -> dict:
         if not out["has_redirect"]:
             out["issues"].append("SPF record has no 'all' mechanism")
 
-    out["lookup_count"] = _count_lookups(record, domain, dc, set())
+    out["has_exp"] = "exp=" in record.lower()
+
+    state = {"seen": set(), "lookups": 0, "void": 0, "dangling": [],
+             "addresses": 0, "multi_tenant": [], "macros": []}
+    _traverse(record, domain, dc, state)
+    out["lookup_count"] = state["lookups"]
+    out["void_lookups"] = state["void"]
+    out["dangling_targets"] = state["dangling"]
+    out["authorised_addresses"] = state["addresses"]
+    out["multi_tenant_includes"] = state["multi_tenant"]
+    out["macros"] = state["macros"]
+
     if out["lookup_count"] > MAX_LOOKUPS:
         out["exceeds_lookup_limit"] = True
         out["issues"].append(
             f"{out['lookup_count']} DNS lookups exceed the RFC 7208 limit of "
             f"{MAX_LOOKUPS} — receivers return permerror")
+    if out["void_lookups"] > MAX_VOID_LOOKUPS:
+        out["exceeds_void_limit"] = True
+        out["issues"].append(
+            f"{out['void_lookups']} void lookups exceed the RFC 7208 §4.6.4 "
+            f"limit of {MAX_VOID_LOOKUPS} — receivers return permerror and SPF "
+            "is void")
+    if out["dangling_targets"]:
+        out["issues"].append(
+            "SPF references target(s) that publish no usable record: "
+            + ", ".join(out["dangling_targets"])
+            + " — each is a wasted (void) lookup and a stale authorisation")
+    if out["multi_tenant_includes"]:
+        out["issues"].append(
+            "SPF authorises shared sending platform(s): "
+            + ", ".join(out["multi_tenant_includes"])
+            + " — every tenant of those platforms passes SPF for this domain; "
+              "DKIM alignment is what actually constrains them")
+    # Roughly a /16 of IPv4 space, or any IPv6 delegation, is a very broad
+    # authorisation for a single organisation's mail.
+    if out["authorised_addresses"] >= 65536:
+        out["issues"].append(
+            f"SPF authorises approximately {out['authorised_addresses']:,} "
+            "addresses — a hardfail policy over a very large sender space "
+            "provides limited assurance")
+    if out["macros"]:
+        out["issues"].append(
+            "SPF uses macro expansion (" + ", ".join(out["macros"][:3])
+            + ") — correct but frequently misconfigured and hard to audit")
     return out

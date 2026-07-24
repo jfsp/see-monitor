@@ -29,7 +29,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "data/see_monitor.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Assessments are now stored per (domain, guideline); this is the guideline
 # used when a caller does not specify one, preserving pre-v2 behaviour.
 DEFAULT_GUIDELINE_ID = "nist_800_177r1"
@@ -130,7 +130,11 @@ class Database:
                 rating         TEXT NOT NULL,
                 no_mail        INTEGER NOT NULL DEFAULT 0,
                 controls_json  TEXT NOT NULL,   -- {control: score|null}
-                findings_json  TEXT NOT NULL
+                findings_json  TEXT NOT NULL,
+                -- v3: profile-independent sub-scores and evidence quality
+                subscores_json TEXT NOT NULL DEFAULT '{}',
+                confidence     TEXT NOT NULL DEFAULT 'high',
+                confidence_notes_json TEXT NOT NULL DEFAULT '[]'
             );
             CREATE INDEX IF NOT EXISTS idx_assess_domain
                 ON assessments(domain, assessed_at);
@@ -234,6 +238,25 @@ class Database:
             # Fresh DB, or an older DB that predates a version: record the
             # current schema version. The v1->v2 change is index-only (added
             # above with IF NOT EXISTS), so no data migration is required.
+            # v2 -> v3 migration: add the new assessment columns in place.
+            # Existing rows keep their scores; the new columns default to an
+            # empty sub-score map and 'high' confidence so historical trend
+            # data stays readable.
+            existing = {r["name"] for r in
+                        conn.execute("PRAGMA table_info(assessments)")}
+            for column, ddl in (
+                    ("subscores_json",
+                     "ALTER TABLE assessments ADD COLUMN subscores_json "
+                     "TEXT NOT NULL DEFAULT '{}'"),
+                    ("confidence",
+                     "ALTER TABLE assessments ADD COLUMN confidence "
+                     "TEXT NOT NULL DEFAULT 'high'"),
+                    ("confidence_notes_json",
+                     "ALTER TABLE assessments ADD COLUMN "
+                     "confidence_notes_json TEXT NOT NULL DEFAULT '[]'")):
+                if column not in existing:
+                    conn.execute(ddl)
+
             if current is None or current < SCHEMA_VERSION:
                 conn.execute(
                     "INSERT INTO schema_version (version, applied_at) "
@@ -298,16 +321,24 @@ class Database:
             conn.execute(
                 "INSERT INTO assessments (run_id, domain, assessed_at, "
                 "guideline, score, rating, no_mail, controls_json, "
-                "findings_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                "findings_json, subscores_json, confidence, "
+                "confidence_notes_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, a["domain"], a["assessed_at"], a["guideline"],
                  a["score"], a["rating"], 1 if a.get("no_mail") else 0,
                  json.dumps(a["control_scores"]),
-                 json.dumps(a["findings"])))
+                 json.dumps(a["findings"]),
+                 json.dumps(a.get("subscores") or {}),
+                 a.get("confidence") or "high",
+                 json.dumps(a.get("confidence_notes") or [])))
 
     def _parse_assessment_row(self, row) -> dict:
         d = dict(row)
         d["control_scores"] = json.loads(d.pop("controls_json"))
         d["findings"] = json.loads(d.pop("findings_json"))
+        d["subscores"] = json.loads(d.pop("subscores_json", None) or "{}")
+        d["confidence_notes"] = json.loads(
+            d.pop("confidence_notes_json", None) or "[]")
+        d.setdefault("confidence", "high")
         d["no_mail"] = bool(d["no_mail"])
         return d
 

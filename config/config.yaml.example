@@ -17,6 +17,40 @@ scanning:
                           # per-domain registered selectors
   nameservers: []         # e.g. ["8.8.8.8", "1.1.1.1"]; empty = system default
 
+  # --- v0.6.0 options ------------------------------------------------------
+  verify_mx_certs: true   # perform the STARTTLS handshake with PKIX validation
+                          # enabled. One connection per MX; a second is made
+                          # only when validation fails, to retrieve the
+                          # certificate the aborted handshake did not deliver.
+  verify_reporting: true  # query the RFC 7489 §7.1 authorisation record for
+                          # external DMARC rua/ruf destinations, and confirm
+                          # the destination domain resolves
+  fcrdns: true            # forward-confirmed reverse DNS on every MX address
+  subdomain_check: true   # assess DMARC coverage of live subdomains
+  max_subdomains: 25      # names checked per domain (shortest first). Raise for
+                          # exhaustive coverage; this is the main driver of
+                          # query volume in a community-wide scan.
+
+# --- Reputation / blocklists ----------------------------------------------
+# Enabled by default and uses ordinary DNS lookups against public zones.
+# NOTE: Spamhaus and others refuse queries arriving from public resolvers or
+# large cloud ranges. A refusal is returned as 127.255.255.x and is reported as
+# 'blocked' — never as clean and never as listed. For sustained or
+# community-scale scanning, obtain a Spamhaus DQS key and replace ip_zones with
+# your DQS zones (<key>.zen.dq.spamhaus.net).
+dnsbl:
+  enabled: true
+  ip_zones: []            # empty = built-in defaults (zen.spamhaus.org,
+                          # bl.spamcop.net, psbl.surriel.com)
+  domain_zones: []        # empty = built-in default (dbl.spamhaus.org)
+
+# --- Certificate Transparency ---------------------------------------------
+# crt.sh is queried for subdomain candidates. No API key. Like every passive
+# source, results are candidates only and are re-confirmed against
+# authoritative DNS before they can affect a score.
+crtsh:
+  enabled: true
+
 # --- Passive intelligence sources -----------------------------------------
 # Shodan is consulted first; Censys is used as an alternative when configured.
 shodan:

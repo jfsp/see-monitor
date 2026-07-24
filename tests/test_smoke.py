@@ -251,6 +251,9 @@ def test_dmarc_strict_ruf_external():
                         "rua=mailto:agg@thirdparty.net; ruf=mailto:f@d.example"]
             return []
 
+        def query(self, name, rdtype):
+            return []
+
     r = dmarc_check.check_dmarc("d.example", FakeDNS())
     assert r["strict_alignment"] is True
     assert r["has_ruf"] is True
@@ -498,3 +501,524 @@ def test_db_check_data_relations():
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ======================================================================
+# v0.6.0 — correctness, new controls, sub-scores and evidence quality
+# ======================================================================
+
+class FakeRD:
+    """Minimal stand-in for a dnspython rdata object."""
+
+    def __init__(self, text="", **attrs):
+        self._text = text
+        for k, v in attrs.items():
+            setattr(self, k, v)
+
+    def to_text(self):
+        return self._text
+
+
+class FakeDNS:
+    """
+    Table-driven DNS stub.
+
+    txt_map:   {name: [txt, ...]}
+    rec_map:   {(name, rdtype): [FakeRD, ...]}
+    """
+
+    def __init__(self, txt_map=None, rec_map=None, ad=None):
+        self.txt_map = txt_map or {}
+        self.rec_map = rec_map or {}
+        self._ad = ad
+        self.queries = []
+
+    def txt(self, name):
+        self.queries.append((name, "TXT"))
+        return list(self.txt_map.get(name, []))
+
+    def query(self, name, rdtype):
+        self.queries.append((name, rdtype))
+        if rdtype == "TXT":
+            return [FakeRD(t) for t in self.txt_map.get(name, [])]
+        return list(self.rec_map.get((name, rdtype), []))
+
+    def ad_flag(self, name, rdtype="SOA"):
+        return self._ad
+
+    def exists(self, name):
+        return any(k[0] == name for k in self.rec_map) or name in self.txt_map
+
+
+# ---------------------------------------------------------------- DMARC
+
+def test_dmarc_tree_walk_inherits_apex_policy():
+    """A subdomain with no record of its own must inherit via the tree walk."""
+    from scanner.dmarc_check import check_dmarc
+    dns = FakeDNS({"_dmarc.example.com":
+                   ["v=DMARC1; p=reject; sp=quarantine; rua=mailto:r@example.com"]})
+    r = check_dmarc("mail.example.com", dns, verify_reporting=False)
+    assert r["present"] is True
+    assert r["inherited"] is True
+    assert r["policy_domain"] == "example.com"
+    assert r["policy"] == "reject"
+    # What actually applies to the subdomain is sp=, not p=
+    assert r["effective_policy"] == "quarantine"
+    assert any("inherited from example.com" in i for i in r["issues"])
+
+
+def test_dmarc_psd_record_is_not_inherited():
+    """A public-suffix operator record must not be treated as the domain's."""
+    from scanner.dmarc_check import check_dmarc
+    dns = FakeDNS({"_dmarc.example.gov.uk": ["v=DMARC1; p=reject; psd=y"]})
+    r = check_dmarc("agency.example.gov.uk", dns, verify_reporting=False)
+    assert r["present"] is False
+    assert r["policy_domain"] is None
+
+
+def test_dmarc_np_tag_and_external_authorisation():
+    from scanner.dmarc_check import check_dmarc
+    txt = {
+        "_dmarc.d.example": [
+            "v=DMARC1; p=reject; sp=reject; np=none; "
+            "rua=mailto:agg@vendor.net"],
+        # No d.example._report._dmarc.vendor.net record => unauthorised
+    }
+    rec = {("vendor.net", "MX"): [FakeRD("10 mx.vendor.net.")]}
+    r = check_dmarc("d.example", FakeDNS(txt, rec))
+    assert r["np_policy"] == "none"
+    assert r["external_rua_domains"] == ["vendor.net"]
+    assert r["external_authorised"] == {"vendor.net": False}
+    assert any("authorisation record" in i for i in r["issues"])
+    assert any("np=none is weaker" in i for i in r["issues"])
+
+
+def test_dmarc_np_reject_is_recognised():
+    from scanner.dmarc_check import check_dmarc
+    dns = FakeDNS({"_dmarc.d.example":
+                   ["v=DMARC1; p=reject; sp=reject; np=reject; "
+                    "rua=mailto:r@d.example"]})
+    r = check_dmarc("d.example", dns, verify_reporting=False)
+    assert r["np_policy"] == "reject"
+    assert not any("np=" in i and "weaker" in i for i in r["issues"])
+
+
+# ------------------------------------------------------------------ SPF
+
+def test_spf_void_lookups_and_dangling_targets():
+    from scanner.spf_check import check_spf
+    txt = {
+        "d.example": ["v=spf1 include:gone1.example include:gone2.example "
+                      "include:gone3.example ip4:192.0.2.0/24 -all"],
+    }
+    r = check_spf("d.example", FakeDNS(txt))
+    assert r["void_lookups"] == 3
+    assert r["exceeds_void_limit"] is True
+    assert set(r["dangling_targets"]) == {
+        "gone1.example", "gone2.example", "gone3.example"}
+    assert any("void lookups exceed" in i for i in r["issues"])
+
+
+def test_spf_address_space_and_multi_tenant_include():
+    from scanner.spf_check import check_spf
+    txt = {
+        "d.example": ["v=spf1 ip4:203.0.113.0/16 include:sendgrid.net -all"],
+        "sendgrid.net": ["v=spf1 ip4:198.51.100.0/24 -all"],
+    }
+    r = check_spf("d.example", FakeDNS(txt))
+    assert r["multi_tenant_includes"] == ["sendgrid.net"]
+    assert r["authorised_addresses"] >= 65536
+    assert r["void_lookups"] == 0
+    assert any("shared sending platform" in i for i in r["issues"])
+    assert any("addresses" in i for i in r["issues"])
+
+
+# ----------------------------------------------------------------- DKIM
+
+def test_dkim_unknown_is_not_scored_as_failure():
+    """No selector found and none registered => unknown, scored n/a."""
+    from scanner.dkim_check import check_dkim
+    from scanner.assessor import assess_domain
+    r = check_dkim("d.example", None, FakeDNS(), True, None)
+    assert r["status"] == "unknown"
+    assert r["confidence"] == "low"
+    assert any("NOT proof" in i for i in r["issues"])
+
+    scan = _strong_scan()
+    scan["checks"]["dkim"] = r
+    a = assess_domain(scan)
+    assert a["control_scores"]["dkim"] is None      # n/a, not 0
+    assert a["confidence"] in ("medium", "low")
+    assert any("DKIM not confirmed" in n for n in a["confidence_notes"])
+
+
+def test_dkim_registered_but_missing_is_a_real_failure():
+    from scanner.dkim_check import check_dkim
+    from scanner.assessor import assess_domain
+    r = check_dkim("d.example", ["sel1"], FakeDNS(), False, None)
+    assert r["status"] == "absent"
+    assert r["confidence"] == "high"
+
+    scan = _strong_scan()
+    scan["checks"]["dkim"] = r
+    a = assess_domain(scan)
+    assert a["control_scores"]["dkim"] == 0
+
+
+# ------------------------------------------------------------- STARTTLS
+
+def test_starttls_three_state_scoring():
+    from scanner.assessor import assess_domain
+
+    def scan_with(starttls):
+        scan = _strong_scan()
+        scan["checks"]["starttls"] = starttls
+        return scan
+
+    unknown = {"applicable": True, "total": 2, "supported_count": 0,
+               "no_tls_count": 0, "unknown_count": 2, "all_starttls": False,
+               "any_weak_tls": False, "hosts": {}, "issues": []}
+    assert assess_domain(scan_with(unknown))["control_scores"]["starttls"] is None
+
+    refused = dict(unknown, no_tls_count=2, unknown_count=0)
+    assert assess_domain(scan_with(refused))["control_scores"]["starttls"] == 0
+
+    partial = {"applicable": True, "total": 2, "supported_count": 1,
+               "no_tls_count": 0, "unknown_count": 1, "all_starttls": False,
+               "any_weak_tls": False, "hosts": {}, "issues": []}
+    score = assess_domain(scan_with(partial))["control_scores"]["starttls"]
+    assert 0 < score <= 90
+
+
+def test_starttls_certificate_problems_cap_the_score():
+    from scanner.assessor import assess_domain
+    scan = _strong_scan()
+    scan["checks"]["starttls"] = {
+        "applicable": True, "total": 1, "supported_count": 1,
+        "no_tls_count": 0, "unknown_count": 0, "all_starttls": True,
+        "any_weak_tls": False, "any_cert_hostname_mismatch": True,
+        "hosts": {}, "issues": []}
+    assert assess_domain(scan)["control_scores"]["starttls"] <= 55
+
+
+# ----------------------------------------------------------------- BIMI
+
+def test_bimi_absent_is_na_and_prerequisite_is_checked():
+    from scanner.policy_checks import check_bimi
+    from scanner.assessor import assess_domain
+
+    absent = check_bimi("d.example", FakeDNS(), {"policy": "reject"})
+    assert absent["present"] is False
+    scan = _strong_scan()
+    scan["checks"]["bimi"] = absent
+    assert assess_domain(scan)["control_scores"]["bimi"] is None
+
+    dns = FakeDNS({"default._bimi.d.example":
+                   ["v=BIMI1; l=https://x/logo.svg; a=https://x/vmc.pem"]})
+    weak = check_bimi("d.example", dns, {"policy": "none"})
+    assert weak["prerequisite_met"] is False
+    assert any("without DMARC enforcement" in i for i in weak["issues"])
+
+
+# ---------------------------------------------------- certificates/DANE
+
+def _self_signed(hostname="mx.example.com", days=365):
+    """Build a throwaway self-signed certificate; returns DER bytes."""
+    import datetime as dt
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
+    now = dt.datetime.now(dt.timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(days=1))
+            .not_valid_after(now + dt.timedelta(days=days))
+            .add_extension(x509.SubjectAlternativeName(
+                [x509.DNSName(hostname)]), critical=False)
+            .sign(key, hashes.SHA256()))
+    return cert.public_bytes(serialization.Encoding.DER)
+
+
+def test_certificate_analysis_hostname_and_self_signed():
+    from scanner.cert_check import analyse_certificate, certificate_issues
+    der = _self_signed("mx.example.com")
+
+    good = analyse_certificate([der], "mx.example.com")
+    assert good["parsed"] and good["hostname_match"] is True
+    assert good["self_signed"] is True
+    assert good["expired"] is False
+    assert good["pkix_valid"] is None          # leaf-only: not judged
+
+    bad = analyse_certificate([der], "mail.other.example")
+    assert bad["hostname_match"] is False
+    assert any("does not match the MX hostname" in i
+               for i in certificate_issues(bad, "mail.other.example"))
+
+
+def test_certificate_wildcard_matching_is_single_label():
+    from scanner.cert_check import _name_matches
+    assert _name_matches("mx.example.com", "*.example.com") is True
+    assert _name_matches("a.b.example.com", "*.example.com") is False
+    assert _name_matches("example.com", "*.example.com") is False
+
+
+def test_tlsa_parsing_rejects_unusable_parameters():
+    from scanner.cert_check import parse_tlsa
+    pkix_ee = parse_tlsa("1 1 1 " + "ab" * 32)
+    assert pkix_ee["smtp_usable"] is False
+    assert any("not usable for SMTP" in i for i in pkix_ee["issues"])
+
+    short = parse_tlsa("3 1 1 abcd")
+    assert short["digest_length_ok"] is False
+
+
+def test_tlsa_matches_presented_certificate():
+    import hashlib
+    from scanner.cert_check import parse_tlsa, match_tlsa
+    der = _self_signed("mx.example.com")
+    digest = hashlib.sha256(der).hexdigest()
+
+    good = [parse_tlsa(f"3 0 1 {digest}")]
+    assert match_tlsa(good, [der])["matched"] is True
+
+    stale = [parse_tlsa("3 0 1 " + "00" * 32)]
+    assert match_tlsa(stale, [der])["matched"] is False
+
+    # DANE-TA(2) cannot be judged from a leaf-only chain
+    ta = [parse_tlsa("2 0 1 " + "00" * 32)]
+    result = match_tlsa(ta, [der])
+    assert result["matched"] is None and result["incomplete_chain"] is True
+
+
+def test_dane_reports_mismatch_against_live_certificate():
+    from scanner.policy_checks import check_dane
+    der = _self_signed("mx.example.com")
+    dns = FakeDNS(rec_map={("_25._tcp.mx.example.com", "TLSA"):
+                           [FakeRD("3 0 1 " + "00" * 32)]})
+    r = check_dane(["mx.example.com"], True, dns, {"mx.example.com": [der]})
+    assert r["mismatched_mx"] == ["mx.example.com"]
+    assert r["usable"] is False
+    assert any("do NOT match" in i for i in r["issues"])
+
+
+# ----------------------------------------------------------- reputation
+
+def test_dnsbl_distinguishes_listed_from_refused():
+    from scanner.dnsbl_check import check_dnsbl
+    from scanner.assessor import assess_domain
+
+    listed = FakeDNS(rec_map={
+        ("1.113.0.203.zen.spamhaus.org", "A"): [FakeRD("127.0.0.4")]})
+    r = check_dnsbl("d.example", ["203.0.113.1"], listed,
+                    ["zen.spamhaus.org"], [])
+    assert r["any_listed"] is True and r["listed_ips"] == ["203.0.113.1"]
+    assert any("exploited host" in i for i in r["issues"])
+
+    refused = FakeDNS(rec_map={
+        ("1.113.0.203.zen.spamhaus.org", "A"): [FakeRD("127.255.255.254")]})
+    b = check_dnsbl("d.example", ["203.0.113.1"], refused,
+                    ["zen.spamhaus.org"], [])
+    assert b["any_listed"] is False and b["any_blocked"] is True
+    assert b["confidence"] == "low"
+
+    scan = _strong_scan()
+    scan["checks"]["reputation"] = b
+    # A refused query must not be scored as a clean result
+    assert assess_domain(scan)["control_scores"]["reputation"] is None
+
+    scan["checks"]["reputation"] = r
+    assert assess_domain(scan)["control_scores"]["reputation"] == 0
+
+
+# ---------------------------------------------------------- DNS hygiene
+
+def test_dns_hygiene_flags_dangling_and_missing_caa():
+    from scanner.dns_hygiene import check_dns_hygiene, registrable_domain
+    dns = FakeDNS(
+        txt_map={},
+        rec_map={
+            ("mx.example.com", "A"): [FakeRD("203.0.113.10")],
+            ("dead.example.com", "CNAME"): [
+                FakeRD("gone.saas.example", target="gone.saas.example.")],
+            ("example.com", "NS"): [FakeRD(target="ns1.provider.net.")],
+        })
+    r = check_dns_hygiene("example.com",
+                          ["mx.example.com", "dead.example.com"],
+                          dns, do_fcrdns=False)
+    assert r["dangling_mx"] == ["dead.example.com"]
+    assert r["mx_is_cname"] == ["dead.example.com"]
+    assert r["takeover_risks"]
+    assert r["caa"]["present"] is False
+    assert r["ns_diverse"] is False
+    assert any("takeover" in i for i in r["issues"])
+    assert registrable_domain("mx1.mail.example.co.uk") == "example.co.uk"
+
+
+def test_dns_hygiene_scoring_penalises_takeover_exposure():
+    from scanner.assessor import assess_domain
+    scan = _strong_scan()
+    scan["checks"]["dns_hygiene"] = {
+        "dangling_mx": ["dead.example.com"],
+        "takeover_risks": [{"name": "mta-sts.example.com",
+                            "cname": "gone.example", "reason": "dangling"}],
+        "mx_is_cname": [], "fcrdns_ok": True,
+        "caa": {"present": True}, "ipv6_ready": True,
+        "nameservers": ["ns1.a.net", "ns2.b.net"], "ns_diverse": True,
+        "issues": []}
+    a = assess_domain(scan)
+    assert a["control_scores"]["dns_hygiene"] == 20
+    assert a["subscores"]["resilience"] is not None
+
+
+# ----------------------------------------------------------- subdomains
+
+def test_subdomain_coverage_detects_weaker_override():
+    from scanner.subdomain_check import check_subdomains
+    dns = FakeDNS(
+        txt_map={"_dmarc.shop.example.com": ["v=DMARC1; p=none"]},
+        rec_map={
+            ("shop.example.com", "A"): [FakeRD("203.0.113.5")],
+            ("news.example.com", "A"): [FakeRD("203.0.113.6")],
+        })
+    r = check_subdomains("example.com",
+                         ["shop.example.com", "news.example.com",
+                          "old.example.com"],
+                         inherited_policy="reject", dns_client=dns)
+    assert r["live"] == 2
+    assert r["weaker_policy"] == ["shop.example.com"]
+    assert r["unprotected"] == ["shop.example.com"]
+    assert r["coverage"] == 0.5
+    assert any("overrides sp=" in i for i in r["issues"])
+
+
+def test_subdomain_check_na_without_candidates():
+    from scanner.subdomain_check import check_subdomains
+    from scanner.assessor import assess_domain
+    r = check_subdomains("example.com", [], "reject", FakeDNS())
+    assert r["applicable"] is False
+    scan = _strong_scan()
+    scan["checks"]["subdomains"] = r
+    assert assess_domain(scan)["control_scores"]["subdomains"] is None
+
+
+def test_crtsh_extraction_filters_and_deduplicates():
+    from scanner.crtsh_client import CrtShClient
+    client = CrtShClient()
+    data = [
+        {"name_value": "*.example.com\nmail.example.com"},
+        {"name_value": "mail.example.com"},
+        {"name_value": "example.com"},              # apex excluded
+        {"name_value": "evil.other.com"},           # out of scope
+        {"common_name": "vpn.example.com"},
+    ]
+    names = client._extract(data, "example.com")
+    assert names == ["mail.example.com", "vpn.example.com"]
+
+
+# ------------------------------------------------- sub-scores / storage
+
+def test_subscores_and_confidence_are_computed():
+    from scanner.assessor import assess_domain
+    a = assess_domain(_strong_scan())
+    for key in ("impersonation", "transport", "resilience"):
+        assert key in a["subscores"]
+    assert a["subscores"]["impersonation"] is not None
+    assert a["confidence"] in ("high", "medium", "low")
+
+
+def test_schema_v3_persists_subscores_and_confidence():
+    from data.database import Database, SCHEMA_VERSION
+    from scanner.assessor import assess_domain
+    assert SCHEMA_VERSION == 3
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(os.path.join(tmp, "v3.db"))
+        run = db.create_run(["example.com"])
+        a = assess_domain(_strong_scan())
+        db.save_assessment(run, a)
+        stored = db.get_latest_assessments(["example.com"])[0]
+        assert stored["subscores"] == a["subscores"]
+        assert stored["confidence"] == a["confidence"]
+        assert isinstance(stored["confidence_notes"], list)
+
+
+def test_schema_v2_database_migrates_in_place():
+    """A v2 database must gain the v3 columns without losing rows."""
+    import json as _json
+    import sqlite3
+    from data.database import Database
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "legacy.db")
+        conn = sqlite3.connect(path)
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL,
+                                         applied_at TEXT NOT NULL);
+            CREATE TABLE scan_runs (id TEXT PRIMARY KEY, started_at TEXT,
+                                    finished_at TEXT, status TEXT,
+                                    trigger TEXT, domains_total INTEGER,
+                                    domains_done INTEGER);
+            CREATE TABLE assessments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT,
+                domain TEXT NOT NULL, assessed_at TEXT NOT NULL,
+                guideline TEXT NOT NULL, score REAL NOT NULL,
+                rating TEXT NOT NULL, no_mail INTEGER NOT NULL DEFAULT 0,
+                controls_json TEXT NOT NULL, findings_json TEXT NOT NULL);
+        """)
+        conn.execute("INSERT INTO schema_version VALUES (2, '2026-01-01')")
+        conn.execute(
+            "INSERT INTO assessments (run_id, domain, assessed_at, guideline,"
+            " score, rating, no_mail, controls_json, findings_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            ("r1", "legacy.example", "2026-01-01T00:00:00Z",
+             "nist_800_177r1", 55.0, "medium", 0, _json.dumps({"spf": 100}),
+             _json.dumps([])))
+        conn.commit()
+        conn.close()
+
+        db = Database(path)                       # triggers migration
+        rows = db.get_latest_assessments(["legacy.example"])
+        assert len(rows) == 1
+        assert rows[0]["score"] == 55.0
+        assert rows[0]["subscores"] == {}         # default for legacy rows
+        assert rows[0]["confidence"] == "high"
+
+
+def test_roadmap_covers_new_controls():
+    from roadmap.generator import generate_domain_roadmap
+    from scanner.assessor import assess_domain
+    scan = _strong_scan()
+    scan["checks"]["dns_hygiene"] = {
+        "dangling_mx": [], "mx_is_cname": [],
+        "takeover_risks": [{"name": "mta-sts.example.com",
+                            "cname": "gone.example", "reason": "dangling"}],
+        "caa": {"present": False}, "fcrdns_ok": False,
+        "nameservers": ["ns1.a.net"], "ns_diverse": False, "issues": []}
+    scan["checks"]["reputation"] = {
+        "enabled": True, "applicable": True, "any_listed": True,
+        "any_blocked": False, "listed_ips": ["203.0.113.1"], "issues": []}
+    scan["checks"]["subdomains"] = {
+        "applicable": True, "live": 2, "coverage": 0.5,
+        "weaker_policy": ["shop.example.com"],
+        "unprotected": ["shop.example.com"], "issues": []}
+    a = assess_domain(scan)
+    rm = generate_domain_roadmap(a, scan["checks"])
+    controls = {act["control"]
+                for phase in rm["phases"] for act in phase["activities"]}
+    assert {"dns_hygiene", "reputation", "subdomains"} <= controls
+
+
+def test_findings_from_new_controls_survive_profile_filtering():
+    """A blocklisted MX must be reported even under a profile that omits it."""
+    from scanner.assessor import assess_domain
+    scan = _profile_scan()
+    scan["checks"]["reputation"] = {
+        "enabled": True, "applicable": True, "any_listed": True,
+        "any_blocked": False, "listed_ips": ["203.0.113.1"],
+        "issues": ["MX address(es) listed on a blocklist: 203.0.113.1"]}
+    a = assess_domain(scan, guideline_id="bsi_tr03182")
+    assert any(f["control"] == "reputation" for f in a["findings"])

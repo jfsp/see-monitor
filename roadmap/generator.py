@@ -173,6 +173,92 @@ def generate_domain_roadmap(assessment: dict, checks: dict | None = None) -> dic
              "Ensure a Null MX (RFC 7505) is present"],
             "BSI TR-03182-11"))
 
+    # --- v0.6.0 controls ------------------------------------------------
+    hygiene = checks.get("dns_hygiene", {})
+    reputation = checks.get("reputation", {})
+    subs = checks.get("subdomains", {})
+    starttls = checks.get("starttls", {})
+
+    if hygiene.get("dangling_mx") or hygiene.get("takeover_risks"):
+        names = list(hygiene.get("dangling_mx") or []) + [
+            t["name"] for t in (hygiene.get("takeover_risks") or [])]
+        acts.append(_activity("P1", "dns_hygiene",
+            "Remove dangling DNS records (takeover exposure)",
+            [f"Delete or repoint: {', '.join(names[:6])}",
+             "Re-check after every SaaS decommission — a dangling mta-sts or "
+             "autodiscover CNAME lets an attacker downgrade or intercept mail"],
+            "Operational / RFC 8461 §3.3"))
+    if hygiene.get("mx_is_cname"):
+        acts.append(_activity("P2", "dns_hygiene",
+            "Replace CNAME'd MX targets with A/AAAA records",
+            ["Point each MX at a name that has address records directly",
+             "Required before DANE TLSA can be published for those hosts"],
+            "RFC 2181 §10.3 / RFC 7672"))
+    if hygiene and not (hygiene.get("caa") or {}).get("present"):
+        acts.append(_activity("P3", "dns_hygiene",
+            "Publish a CAA record",
+            ["Restrict issuance to the CA(s) actually used",
+             "Constrains who can mint a certificate that satisfies MTA-STS"],
+            "RFC 8659"))
+    if hygiene.get("fcrdns_ok") is False:
+        acts.append(_activity("P2", "dns_hygiene",
+            "Fix reverse DNS on the mail servers",
+            ["Publish a PTR for every MX address",
+             "Ensure the PTR name resolves forward to the same address"],
+            "Operational deliverability"))
+    ns = hygiene.get("nameservers") or []
+    if ns and (len(ns) < 2 or hygiene.get("ns_diverse") is False):
+        acts.append(_activity("P3", "dns_hygiene",
+            "Add nameserver diversity",
+            ["Use at least two nameservers across more than one provider",
+             "DNS is the shared dependency of SPF, DKIM, DMARC, MTA-STS and "
+             "DANE — a single provider outage disables all of them at once"],
+            "Operational resilience"))
+
+    if reputation.get("any_listed"):
+        acts.append(_activity("P1", "reputation",
+            "Resolve blocklist listings",
+            ["Identify the compromised host or abusive sender",
+             f"Listed: {', '.join(reputation.get('listed_ips') or []) or 'domain'}",
+             "Remediate, then request delisting from each operator"],
+            "Operational — active abuse indicator"))
+
+    if subs.get("weaker_policy"):
+        acts.append(_activity("P2", "subdomains",
+            "Remove weaker subdomain DMARC records",
+            [f"Raise or delete DMARC at: {', '.join(subs['weaker_policy'][:6])}",
+             "A subdomain record overrides the apex sp= entirely"],
+            "RFC 7489 §6.6.3"))
+    if subs.get("unprotected"):
+        acts.append(_activity("P2", "subdomains",
+            "Extend DMARC enforcement across the subdomain tree",
+            ["Set sp=reject at the apex to cover existing subdomains",
+             "Set np=reject to cover names that do not exist (DMARCbis)",
+             f"{len(subs['unprotected'])} live subdomain(s) currently spoofable"],
+            "DMARCbis"))
+
+    if starttls.get("any_auth_before_tls"):
+        acts.append(_activity("P1", "starttls",
+            "Stop advertising SMTP AUTH before STARTTLS",
+            ["Disable AUTH on the cleartext session (port 25)",
+             "Offer authentication only after the TLS handshake"],
+            "RFC 4954 §4 / CCN-CERT BP/02"))
+    if starttls.get("any_cert_hostname_mismatch") or \
+            starttls.get("any_cert_invalid"):
+        acts.append(_activity("P1", "starttls",
+            "Fix the MX server certificates",
+            ["Issue certificates whose SAN covers the MX hostname",
+             "Serve the full chain including intermediates",
+             "Without this, MTA-STS enforce and DANE both fail"],
+            "RFC 8461 §4.1 / RFC 7672"))
+    if checks.get("dane", {}).get("mismatched_mx"):
+        acts.append(_activity("P1", "dane",
+            "Re-publish TLSA records to match the live certificate",
+            ["TLSA no longer matches the presented certificate",
+             "DANE-validating senders are already refusing delivery",
+             "Automate TLSA rollover with the certificate renewal process"],
+            "RFC 7672 §8"))
+
     phases = []
     for pid, label in _PHASES:
         items = [a for a in acts if a["phase"] == pid]

@@ -36,10 +36,17 @@ for consistency.
 |---------|--------|
 | 1 | Initial schema. |
 | 2 | Multi-profile scoring. Added index `idx_assess_domain_guideline` on `assessments(guideline, domain, assessed_at)` for latest-per-(domain,guideline) lookups. **Index-only — no data migration.** |
+| 3 | Sub-scores and evidence quality. Added `assessments.subscores_json`, `assessments.confidence`, `assessments.confidence_notes_json`. **Additive migration:** the three columns are appended with `ALTER TABLE … ADD COLUMN` when absent, each with a default, so existing rows remain valid and readable. No data is rewritten and no row is lost. |
 
 On startup, if the stored version is missing or `< SCHEMA_VERSION`, a new
 `schema_version` row is inserted (indexes are created idempotently with
 `IF NOT EXISTS`).
+
+Migrations are executed before the version row is written and are guarded by
+`PRAGMA table_info`, so `Database()` is safe to call repeatedly and safe to
+call against a database created by an older release. Downgrading is not
+supported: an older binary reading a v3 database will simply ignore the extra
+columns.
 
 ---
 
@@ -85,6 +92,9 @@ multiple rows for the same scan (see [Guideline profiles](#guideline-profiles)).
 | `no_mail` | INTEGER NOT NULL | `0`/`1`; transport controls are n/a when `1`. |
 | `controls_json` | TEXT NOT NULL | `{control: score|null}`. |
 | `findings_json` | TEXT NOT NULL | `[{control, severity, message}]`. |
+| `subscores_json` | TEXT NOT NULL DEFAULT `'{}'` | v3. `{impersonation, transport, resilience}` → 0–100 or `null`. Profile-independent. |
+| `confidence` | TEXT NOT NULL DEFAULT `'high'` | v3. Evidence quality: `high` / `medium` / `low`. Validated by `db_check.py`. |
+| `confidence_notes_json` | TEXT NOT NULL DEFAULT `'[]'` | v3. `["DKIM not confirmed…", …]` — why the confidence is not `high`. |
 
 Indexes: `idx_assess_domain(domain, assessed_at)`,
 `idx_assess_domain_guideline(guideline, domain, assessed_at)`.
@@ -260,9 +270,11 @@ user_*.user_id, audit_log.user_id ──· users.id   (soft, validated by db_che
 
 | Column | Shape |
 |--------|-------|
-| `raw_scans.checks_json` | `{ "spf": {...}, "dkim": {...}, … , "client_tls": {...} }` — raw scanner output per control. |
+| `raw_scans.checks_json` | `{ "spf": {...}, "dkim": {...}, … , "client_tls": {...}, "dns_hygiene": {...}, "reputation": {...}, "subdomains": {...} }` — raw scanner output per control. **Never contains raw certificate bytes:** the STARTTLS probe's `_chain_der` and `starttls._chains` are consumed in-memory by the certificate and DANE analysis and stripped by the orchestrator before persistence. |
 | `assessments.controls_json` | `{ "spf": 100, "dane": null, … }` — per-control score or `null` (n/a). |
 | `assessments.findings_json` | `[ { "control", "severity", "message" }, … ]`. |
+| `assessments.subscores_json` | `{ "impersonation": 82.5, "transport": 40.0, "resilience": null }` — orthogonal views over the same control scores. `null` when no contributing control was applicable. |
+| `assessments.confidence_notes_json` | `[ "DKIM not confirmed: no selector found and none registered", … ]`. |
 | `domain_lists.domains_json` | `[ "example.com", … ]`. |
 | `roadmaps.roadmap_json` | Roadmap structure from `roadmap/generator.py`. |
 
