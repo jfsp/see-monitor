@@ -99,6 +99,14 @@ multiple rows for the same scan (see [Guideline profiles](#guideline-profiles)).
 Indexes: `idx_assess_domain(domain, assessed_at)`,
 `idx_assess_domain_guideline(guideline, domain, assessed_at)`.
 
+> **`scheduled_scans.next_run_at` (0.6.1).** Written at creation and refreshed
+> after every run from the live APScheduler job (falling back to
+> `now + interval_hours` when the scheduler is not running). Before 0.6.1 it was
+> written once and never updated, so the stored value drifted. APScheduler
+> remains the authority for when a job actually fires; this column is a
+> reporting convenience. `scripts/schedule_audit.py` derives "overdue" from
+> `last_run_at + interval_hours`, not from this column.
+
 ### `dkim_selectors`
 Known DKIM selectors per domain (wordlist is not stored; discovered/registered
 selectors are).

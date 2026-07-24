@@ -1,12 +1,13 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.6.0 · **Status:** functional, all tests passing (51) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.6.1 · **Status:** functional, all tests passing (63) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 > Final handover for this session. Recent additions are summarised in
 > `CHANGELOG.md` (0.3.0 profiles → 0.4.0 status dashboards + trends → 0.5.0 PDF
 > export → 0.5.1 DB consistency checker + schema doc → **0.6.0 assessment
 > depth: evidence model, certificate/DANE verification, DNS hygiene,
-> reputation, subdomain coverage, sub-scores**).
+> reputation, subdomain coverage, sub-scores** → **0.6.1 scheduler coverage:
+> multi-profile scheduled runs, schedule audit tool, `--rescan-all`**).
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -46,12 +47,12 @@ shows all profiles (`--profile` to limit).
 
 - **Working source (ephemeral):** `/home/claude/see/see-monitor` — resets
   between sessions. Do not rely on it persisting.
-- **Deliverable (persistent):** `see-monitor-0.6.0.zip` in the outputs area.
+- **Deliverable (persistent):** `see-monitor-0.6.1.zip` in the outputs area.
   **Start a new session by extracting this zip.**
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
 
-Run tests: `python3 -m pytest tests/test_smoke.py -q` (51 passing).
+Run tests: `python3 -m pytest tests/test_smoke.py -q` (63 passing).
 DB audit:  `python3 scripts/db_check.py --db data/see_monitor.db` (read-only).
 Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycache__*")`.
 
@@ -108,11 +109,16 @@ reports/
   pdf_report.py         reportlab scope + trend PDF reports (profile-aware)
 guidelines/*.json       scoring profiles: nist_800_177r1 (default) +
                         bsi_tr03182, acn_email, ccn_cert_bp02
-auth/ admin/ scheduler/ reused from pqc-monitor, rewired to the new DB API
+auth/ admin/            reused from pqc-monitor, rewired to the new DB API
+scheduler/
+  scan_scheduler.py     APScheduler jobs; multi-profile assessment, reload(),
+                        next_run_at bookkeeping, post-run DB health gate
+  schedule_audit.py     coverage audit + idempotent weekly all-domains repair
 ```
 
 Ops: `install.sh`, `scripts/{deploy,sync-tree,wait-for-db,fix-permissions}.sh`,
 `scripts/reassess_all.py`, `scripts/db_check.py` (read-only consistency audit),
+`scripts/schedule_audit.py` (schedule coverage audit / `--create-weekly`),
 `systemd/{web,scheduler,target,nginx,env}`,
 `.gitattributes`, `config/config.yaml.example`, `tests/test_smoke.py`.
 
@@ -178,7 +184,19 @@ Ops: `install.sh`, `scripts/{deploy,sync-tree,wait-for-db,fix-permissions}.sh`,
    but are deliberately absent from `required_signals` /
    `very_strong_requirements`, which reflect only what the published standard
    actually mandates. This extends invariant 9.
-15. **`scripts/db_check.py` is read-only** (opens the DB `mode=ro`); it must
+15. **Coverage is not automatic.** The scheduler only runs `scheduled_scans`
+   rows, each bound to one domain list. Nothing keeps those lists in step with
+   the domains accumulating in the database, so any feature that adds domains
+   must be paired with `schedules --create-weekly` (or an explicit list
+   update), or those domains are never rescanned. `scripts/schedule_audit.py`
+   is the check for this and exits 1 on a gap.
+16. **Never re-register an unchanged APScheduler job.** `_register_job` uses
+   `replace_existing=True`, which recomputes `next_run_time` from now. The
+   hourly `reload()` tick therefore compares the stored definition against the
+   live job (`_job_changed`) and skips unchanged ones — otherwise a 168h
+   schedule reset every 60 minutes would never fire. This is subtle and easy to
+   reintroduce.
+17. **`scripts/db_check.py` is read-only** (opens the DB `mode=ro`); it must
    never mutate data. When the schema changes, update BOTH `SCHEMA_VERSION`
    (+ migration) AND `docs/DATABASE.md`, and extend `db_check.py` if new
    references/invariants are introduced.
@@ -259,6 +277,11 @@ detail + per-service diagnostics (works before *or* after the subcommand);
   offline PKIX validation is skipped (the authoritative PKIX verdict still
   comes from the verifying handshake). DANE-TA(2) matching reports *unknown*
   in that case rather than a false mismatch — see `match_tlsa`.
+- **Coverage after upgrade.** Run `see_monitor.py scan --rescan-all` once after
+  deploying 0.6.x — the scheduler picks the new checks up on its own cycle, but
+  that is up to a week away, and `reassess_all.py` cannot substitute because
+  pre-0.6.0 scans contain none of the new check data. Then
+  `see_monitor.py schedules` to confirm every domain is actually scheduled.
 - **Scores move on upgrade.** Run `scripts/reassess_all.py` after deploying
   0.6.0. Domains previously penalised for an undiscoverable DKIM selector or an
   unreachable MX rise; domains with dangling DNS, invalid MX certificates or
@@ -282,8 +305,8 @@ detail + per-service diagnostics (works before *or* after the subcommand);
    for broader selector coverage at scale.
 7. ~~`CHANGELOG.md`~~ **DONE** — created and maintained (0.1.0–0.5.1).
 9. ~~DB schema doc + consistency checker~~ **DONE** (0.5.1, `docs/DATABASE.md`
-   + `scripts/db_check.py`). Wire `db_check` into CI / a scheduler health check
-   if desired.
+   + `scripts/db_check.py`). ~~Wire `db_check` into a scheduler health check~~
+   **DONE** (0.6.1, `scheduling.post_run_db_check`). Still not wired into CI.
 8. **Future features, documented not coded** (all in README "Future features",
    each with the reason it is out of scope): PGP/S-MIME via WKD/keyservers and
    SMIMEA; inbound DMARC/TLS-RPT report ingestion (rejected on the
@@ -296,17 +319,23 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 11. Consider surfacing sub-scores and `confidence` in the dashboard SPA and the
    PDF reports — they are persisted (schema v3) and returned by the API, but
    only the CLI renders them today.
+12. The web UI has no schedule-coverage view; `see_monitor.py schedules` and
+   `scripts/schedule_audit.py` are CLI-only. An admin page showing coverage %
+   and a "cover all domains" button would be a natural addition.
+13. `scheduling.profiles` is honoured but not exposed in the UI.
 
 ---
 
 ## 9. Version & changelog convention
 
 - Version is single-sourced from the `VERSION` file (read by `version.py`).
-  Now at **0.6.0**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
+  Now at **0.6.1**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
   profiles) → 0.4.0 (status dashboards + trends) → 0.5.0 (PDF export) →
   0.5.1 (DB consistency checker + schema doc) → 0.6.0 (assessment depth:
   evidence model, certificate/DANE verification, DNS hygiene, reputation,
-  subdomain coverage, sub-scores). Full detail in `CHANGELOG.md`.
+  subdomain coverage, sub-scores) → 0.6.1 (scheduler coverage: multi-profile
+  scheduled runs, schedule audit + `--create-weekly`, `scan --rescan-all`,
+  post-run DB health gate). Full detail in `CHANGELOG.md`.
 - **Convention going forward:** every change ships with a Conventional-Commits
   changelog. The 0.1.0→0.2.0 commits are listed in the session notes; seed
   `CHANGELOG.md` from them when created. Commit trailer used:
@@ -316,8 +345,8 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 
 ## 10. First steps in the next session
 
-1. Extract `see-monitor-0.6.0.zip`; run `pytest tests/test_smoke.py -q`
-   (expect 51 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
+1. Extract `see-monitor-0.6.1.zip`; run `pytest tests/test_smoke.py -q`
+   (expect 63 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
    clean base (the v2→v3 migration is applied on first `Database()` open).
 2. Pick from §8. Cheapest high-value items remain `SESSION_COOKIE_NAME` (§6)
    and the passive-key env/config gap (§5).

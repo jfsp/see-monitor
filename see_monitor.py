@@ -285,8 +285,13 @@ def _render_sources(svc: dict, indent: str) -> str:
 @click.option("--profile", "profiles_opt", multiple=True,
               help="Conformance profile(s) to score against (repeatable). "
                    "Default: all installed. e.g. --profile bsi_tr03182")
+@click.option("--rescan-all", "rescan_all", is_flag=True,
+              help="Rescan every domain already known to the database "
+                   "(domain lists, past assessments, organisation "
+                   "assignments). Use after upgrading to pick up new checks.")
 @click.pass_context
-def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt):
+def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
+         rescan_all):
     """Scan and assess one or more domains.
 
     Default output is a per-domain summary showing what was found and which
@@ -309,10 +314,18 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt):
             targets += [ln.strip() for ln in fh if ln.strip()
                         and not ln.startswith("#")]
     targets = [d.strip().lower().rstrip(".") for d in targets if d.strip()]
-    if not targets:
-        raise click.UsageError("No domains supplied.")
 
     db = Database(cfg.get("db_path", "data/see_monitor.db"))
+    if rescan_all:
+        known = db.get_all_known_domains()
+        if not known:
+            raise click.UsageError(
+                "--rescan-all: the database contains no domains yet.")
+        targets = sorted(set(targets) | set(known))
+    if not targets:
+        raise click.UsageError(
+            "No domains supplied. Pass domains, --list FILE or --rescan-all.")
+
     orch = ScanOrchestrator(cfg, db=db)
 
     if not as_json and not quiet:
@@ -372,12 +385,115 @@ def scheduler_daemon(ctx):
     orch = ScanOrchestrator(cfg, db=db)
     sched = ScanScheduler(orch, db, config=cfg)
     sched.start()
-    click.echo("Scheduler running. Ctrl-C to stop.")
+    click.echo(f"Scheduler running (schedule reload every "
+               f"{sched.reload_minutes} min). Ctrl-C to stop.")
     try:
         while True:
-            time.sleep(3600)
+            time.sleep(max(60, sched.reload_minutes * 60))
+            # Pick up schedules added or removed by another process (e.g.
+            # scripts/schedule_audit.py) without needing a service restart.
+            sched.reload()
     except KeyboardInterrupt:
         sched.stop()
+
+
+@cli.command("schedules")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON only.")
+@click.option("--create-weekly", is_flag=True,
+              help="Create/refresh one auto-managed list of every known "
+                   "domain, driven by a single weekly schedule (idempotent).")
+@click.option("--interval-hours", default=None, type=int,
+              help="Interval for --create-weekly (default 168 = weekly).")
+@click.option("--dry-run", is_flag=True,
+              help="With --create-weekly, report what would change and exit.")
+@click.pass_context
+def schedules(ctx, as_json, create_weekly, interval_hours, dry_run):
+    """Audit periodic scan schedules against the domains in the database.
+
+    Reports which schedules exist, which domains they cover, and which known
+    domains are in no enabled schedule and are therefore never rescanned.
+    With --create-weekly, closes that gap.
+    """
+    import json as _json
+    from data.database import Database
+    from scheduler.schedule_audit import (audit_schedules,
+                                          create_weekly_all_domains,
+                                          DEFAULT_INTERVAL_HOURS)
+    cfg = ctx.obj["config"]
+    db = Database(cfg.get("db_path", "data/see_monitor.db"))
+
+    action = None
+    if create_weekly:
+        action = create_weekly_all_domains(
+            db, interval_hours or DEFAULT_INTERVAL_HOURS, dry_run=dry_run)
+
+    report = audit_schedules(db)
+    if as_json:
+        payload = {"audit": report}
+        if action:
+            payload["action"] = action
+        click.echo(_json.dumps(payload, indent=2))
+        return
+
+    click.echo(click.style("Scheduled scans", bold=True))
+    if not report["schedules"]:
+        click.echo(click.style("  none configured", fg="red"))
+    for sc in report["schedules"]:
+        state = (click.style("enabled", fg="green") if sc["enabled"]
+                 else click.style("disabled", fg="red"))
+        click.echo(f"  [{sc['id']}] {sc['name']}  ({state}, "
+                   f"every {sc['interval_hours']}h)")
+        click.echo(f"      list: {sc['list_name'] or '<missing>'} "
+                   f"({sc['domain_count']} domain(s))")
+        click.echo(f"      last: {sc['last_run_at'] or 'never'}   "
+                   f"next: {sc['next_run_at'] or 'unknown'}")
+        for problem in sc["problems"]:
+            click.echo(click.style(f"      ! {problem}", fg="yellow"))
+
+    cov = report["coverage"]
+    pct = "n/a" if cov is None else f"{cov * 100:.0f}%"
+    colour = "green" if cov == 1 else ("yellow" if cov else "red")
+    click.echo("")
+    click.echo(click.style("Coverage", bold=True))
+    click.echo(f"  {len(report['covered'])} of {report['known_domains']} "
+               f"known domain(s) covered  ("
+               + click.style(pct, fg=colour) + ")")
+    if report["uncovered"]:
+        shown = ", ".join(report["uncovered"][:10])
+        more = ("" if len(report["uncovered"]) <= 10
+                else f"  (+{len(report['uncovered']) - 10} more)")
+        click.echo(click.style(f"  never rescanned: {shown}{more}", fg="red"))
+    if report["duplicated"]:
+        click.echo(click.style(
+            f"  {len(report['duplicated'])} domain(s) in multiple schedules",
+            fg="yellow"))
+
+    if report["problems"]:
+        click.echo("")
+        click.echo(click.style("Problems", bold=True))
+        for problem in report["problems"]:
+            click.echo(click.style(f"  ! {problem}", fg="yellow"))
+    if report["recommendations"] and not create_weekly:
+        click.echo("")
+        click.echo(click.style("Recommendations", bold=True))
+        for rec in report["recommendations"]:
+            click.echo(f"  → {rec}")
+
+    if action:
+        click.echo("")
+        head = "Would apply" if action["dry_run"] else "Applied"
+        click.echo(click.style(head, bold=True))
+        click.echo(f"  list      {action['list_action']} "
+                   f"({action['domains']} domain(s))")
+        click.echo(f"  schedule  {action['schedule_action']}")
+        if action["added"]:
+            click.echo(f"  added     {len(action['added'])}: "
+                       + ", ".join(action["added"][:8]))
+        if action["removed"]:
+            click.echo(f"  removed   {len(action['removed'])}: "
+                       + ", ".join(action["removed"][:8]))
+        for note in action["notes"]:
+            click.echo(click.style(f"  note      {note}", fg="bright_black"))
 
 
 @cli.command()

@@ -84,6 +84,42 @@ Two domains can share a rating while differing sharply here: a "partial" domain
 with `impersonation` 90 and `resilience` 30 needs completely different work
 from its mirror image.
 
+### Keeping scans current
+
+The scheduler executes rows in `scheduled_scans`, each bound to exactly one
+domain list. **There is no "scan everything" default**: a domain scanned once
+from the CLI and never added to a list is never rescanned. Coverage therefore
+decays silently as new domains enter the database.
+
+```bash
+# What is scheduled, and which known domains are never rescanned?
+python3 see_monitor.py schedules
+python3 scripts/schedule_audit.py --db /var/lib/see-monitor/see_monitor.db
+
+# Close the gap: one auto-managed list of every known domain, one weekly job
+python3 see_monitor.py schedules --create-weekly --dry-run
+python3 see_monitor.py schedules --create-weekly
+
+# Rescan everything now (required once after upgrading — new checks only
+# appear in scans executed after the upgrade)
+python3 see_monitor.py scan --rescan-all
+```
+
+`--create-weekly` is idempotent and safe to run from cron; it updates the
+auto-managed list in place as new domains appear rather than creating
+duplicates. A running scheduler daemon picks the change up on its next reload
+tick (`scheduling.reload_interval_minutes`, default 60 minutes) — no service
+restart needed.
+
+`scripts/schedule_audit.py` exits 1 when coverage gaps or schedule problems
+exist, so it doubles as a cron health check. An "overdue" schedule is usually
+the fastest signal that the daemon has stopped.
+
+Note that `scripts/reassess_all.py` re-scores **stored** scans without
+re-querying DNS. It is the right tool after changing weights or rating bands,
+and the wrong tool after adding checks: scans taken before the upgrade contain
+none of the new data, so the new controls come back n/a.
+
 ---
 
 ## Scoring

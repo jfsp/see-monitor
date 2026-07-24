@@ -1022,3 +1022,272 @@ def test_findings_from_new_controls_survive_profile_filtering():
         "issues": ["MX address(es) listed on a blocklist: 203.0.113.1"]}
     a = assess_domain(scan, guideline_id="bsi_tr03182")
     assert any(f["control"] == "reputation" for f in a["findings"])
+
+
+# ======================================================================
+# v0.6.1 — scheduler coverage, multi-profile scheduled runs, audit tool
+# ======================================================================
+
+def _sched_db(tmp):
+    from data.database import Database
+    return Database(os.path.join(tmp, "sched.db"))
+
+
+def test_schedule_audit_reports_uncovered_domains():
+    from scheduler.schedule_audit import audit_schedules
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        lid = db.save_domain_list("Partial", ["a.example", "b.example"])
+        db.save_domain_list("Not scheduled", ["c.example", "d.example"])
+        with db._connect() as conn:
+            conn.execute(
+                "INSERT INTO scheduled_scans (name, domain_list_id, "
+                "interval_hours, enabled, next_run_at) VALUES (?,?,?,1,?)",
+                ("Weekly", lid, 168, "2026-01-08T00:00:00+00:00"))
+
+        r = audit_schedules(db)
+        assert r["known_domains"] == 4
+        assert r["covered"] == ["a.example", "b.example"]
+        assert r["uncovered"] == ["c.example", "d.example"]
+        assert r["coverage"] == 0.5
+        assert any("never be rescanned" in p for p in r["problems"])
+
+
+def test_schedule_audit_flags_orphan_disabled_and_overdue():
+    from scheduler.schedule_audit import audit_schedules
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        lid = db.save_domain_list("L", ["a.example"])
+        empty = db.save_domain_list("Empty", [])
+        with db._connect() as conn:
+            # Overdue: last run long ago, weekly interval
+            conn.execute(
+                "INSERT INTO scheduled_scans (name, domain_list_id, "
+                "interval_hours, enabled, last_run_at) VALUES (?,?,?,1,?)",
+                ("Stale", lid, 168, "2020-01-01T00:00:00+00:00"))
+            # Unbound: no domain list at all
+            conn.execute(
+                "INSERT INTO scheduled_scans (name, domain_list_id, "
+                "interval_hours, enabled) VALUES (?,NULL,?,1)",
+                ("Unbound", 24))
+            # Disabled, and bound to an empty list
+            conn.execute(
+                "INSERT INTO scheduled_scans (name, domain_list_id, "
+                "interval_hours, enabled) VALUES (?,?,?,0)",
+                ("Off", empty, 24))
+
+        r = audit_schedules(db)
+        assert "Unbound" in r["orphan_schedules"]
+        assert "Off" in r["disabled_schedules"]
+        assert [s["name"] for s in r["schedules"] if s["overdue"]] == ["Stale"]
+        assert any("Overdue" in p for p in r["problems"])
+        assert any("missing or empty domain list" in p for p in r["problems"])
+
+
+def test_schedule_audit_detects_duplicate_coverage():
+    from scheduler.schedule_audit import audit_schedules
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        a = db.save_domain_list("A", ["dup.example", "x.example"])
+        b = db.save_domain_list("B", ["dup.example", "y.example"])
+        with db._connect() as conn:
+            for name, lid in (("First", a), ("Second", b)):
+                conn.execute(
+                    "INSERT INTO scheduled_scans (name, domain_list_id, "
+                    "interval_hours, enabled) VALUES (?,?,168,1)", (name, lid))
+        r = audit_schedules(db)
+        assert list(r["duplicated"]) == ["dup.example"]
+        assert set(r["duplicated"]["dup.example"]) == {"First", "Second"}
+
+
+def test_create_weekly_is_idempotent_and_closes_the_gap():
+    from scheduler.schedule_audit import (audit_schedules,
+                                          create_weekly_all_domains,
+                                          AUTO_SCHEDULE_NAME)
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        db.save_domain_list("Seed", ["a.example", "b.example", "c.example"])
+
+        dry = create_weekly_all_domains(db, dry_run=True)
+        assert dry["dry_run"] is True and dry["schedule_action"] == "created"
+        assert audit_schedules(db)["coverage"] == 0.0   # nothing written
+
+        first = create_weekly_all_domains(db)
+        assert first["list_action"] == "created"
+        assert first["schedule_action"] == "created"
+        assert audit_schedules(db)["coverage"] == 1.0
+
+        again = create_weekly_all_domains(db)
+        assert again["list_action"] == "unchanged"
+        assert again["schedule_action"] == "unchanged"
+
+        with db._connect() as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) c FROM scheduled_scans WHERE name=?",
+                (AUTO_SCHEDULE_NAME,)).fetchone()
+        assert rows["c"] == 1                            # no duplicate
+
+
+def test_create_weekly_picks_up_new_domains():
+    from scheduler.schedule_audit import (audit_schedules,
+                                          create_weekly_all_domains)
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        db.save_domain_list("Seed", ["a.example"])
+        create_weekly_all_domains(db)
+
+        db.save_domain_list("Later", ["new.example"])
+        assert audit_schedules(db)["uncovered"] == ["new.example"]
+
+        again = create_weekly_all_domains(db)
+        assert again["list_action"] == "updated"
+        assert again["added"] == ["new.example"]
+        assert audit_schedules(db)["coverage"] == 1.0
+
+
+def test_create_weekly_respects_custom_interval():
+    from scheduler.schedule_audit import (create_weekly_all_domains,
+                                          AUTO_SCHEDULE_NAME)
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        db.save_domain_list("Seed", ["a.example"])
+        create_weekly_all_domains(db, interval_hours=24)
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT interval_hours FROM scheduled_scans WHERE name=?",
+                (AUTO_SCHEDULE_NAME,)).fetchone()
+        assert row["interval_hours"] == 24
+
+        changed = create_weekly_all_domains(db, interval_hours=168)
+        assert changed["schedule_action"] == "updated"
+
+
+def test_scheduled_scan_writes_every_profile():
+    """Regression: scheduled runs used to persist only the default profile."""
+    from scheduler.scan_scheduler import ScanScheduler
+    from scanner.assessor import available_guidelines
+    scan = _strong_scan()
+
+    class FakeOrchestrator:
+        def scan_domain(self, domain):
+            result = dict(scan)
+            result["domain"] = domain
+            return result
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        lid = db.save_domain_list("L", ["example.com"])
+        with db._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO scheduled_scans (name, domain_list_id, "
+                "interval_hours, enabled) VALUES (?,?,168,1)", ("W", lid))
+            sid = cur.lastrowid
+
+        sched = ScanScheduler(FakeOrchestrator(), db,
+                              config={"scheduling": {"post_run_db_check": False}})
+        run_id = sched._run_scheduled_scan(sid, lid)
+
+        with db._connect() as conn:
+            rows = conn.execute(
+                "SELECT guideline FROM assessments WHERE run_id=?",
+                (run_id,)).fetchall()
+        assert {r["guideline"] for r in rows} == set(available_guidelines())
+
+
+def test_scheduled_scan_updates_last_and_next_run():
+    from scheduler.scan_scheduler import ScanScheduler
+    scan = _strong_scan()
+
+    class FakeOrchestrator:
+        def scan_domain(self, domain):
+            return dict(scan, domain=domain)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        lid = db.save_domain_list("L", ["example.com"])
+        with db._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO scheduled_scans (name, domain_list_id, "
+                "interval_hours, enabled) VALUES (?,?,24,1)", ("W", lid))
+            sid = cur.lastrowid
+
+        sched = ScanScheduler(FakeOrchestrator(), db,
+                              config={"scheduling": {"post_run_db_check": False}})
+        sched._run_scheduled_scan(sid, lid)
+
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT last_run_at, next_run_at FROM scheduled_scans "
+                "WHERE id=?", (sid,)).fetchone()
+        assert row["last_run_at"] and row["next_run_at"]
+        assert row["next_run_at"] > row["last_run_at"]
+
+
+def test_scheduled_scan_marks_errors_when_db_check_fails(monkeypatch):
+    from scheduler import scan_scheduler as ss
+    scan = _strong_scan()
+
+    class FakeOrchestrator:
+        def scan_domain(self, domain):
+            return dict(scan, domain=domain)
+
+    class FakeIssue:
+        level = "error"
+        check = "json"
+        detail = "synthetic failure"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        lid = db.save_domain_list("L", ["example.com"])
+        with db._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO scheduled_scans (name, domain_list_id, "
+                "interval_hours, enabled) VALUES (?,?,168,1)", ("W", lid))
+            sid = cur.lastrowid
+
+        sched = ss.ScanScheduler(FakeOrchestrator(), db,
+                                 config={"scheduling":
+                                         {"post_run_db_check": True}})
+        monkeypatch.setattr(sched, "_db_check_failed", lambda: True)
+        run_id = sched._run_scheduled_scan(sid, lid)
+
+        with db._connect() as conn:
+            row = conn.execute("SELECT status FROM scan_runs WHERE id=?",
+                               (run_id,)).fetchone()
+        assert row["status"] == "completed_with_errors"
+
+
+def test_db_check_failure_never_raises():
+    """A broken health check must not lose the scan that was just written."""
+    from scheduler.scan_scheduler import ScanScheduler
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _sched_db(tmp)
+        sched = ScanScheduler(None, db, config={})
+        db.db_path = "/nonexistent/path/to.db"
+        assert sched._db_check_failed() in (True, False)
+
+
+def test_rescan_all_requires_known_domains(monkeypatch):
+    """--rescan-all must fail clearly rather than silently scanning nothing."""
+    from click.testing import CliRunner
+    import see_monitor
+    with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setattr(
+            see_monitor, "load_config",
+            lambda *a, **k: {"db_path": os.path.join(tmp, "empty.db"),
+                             "scanning": {"active_smtp": False}})
+        res = CliRunner().invoke(see_monitor.cli, ["scan", "--rescan-all"])
+        assert res.exit_code != 0
+        assert "no domains yet" in res.output.lower()
+
+
+def test_scan_without_targets_mentions_rescan_all(monkeypatch):
+    from click.testing import CliRunner
+    import see_monitor
+    with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setattr(
+            see_monitor, "load_config",
+            lambda *a, **k: {"db_path": os.path.join(tmp, "empty.db")})
+        res = CliRunner().invoke(see_monitor.cli, ["scan"])
+        assert res.exit_code != 0
+        assert "--rescan-all" in res.output

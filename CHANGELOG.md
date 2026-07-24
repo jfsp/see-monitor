@@ -4,6 +4,69 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.6.1] — 2026-07-24
+
+Operational release. 0.6.0 added the checks; this makes sure they actually
+reach every domain. Two of the fixes below are long-standing bugs found while
+answering "does the scheduler rescan everything automatically?" — the answer
+was no, and it was not scoring all profiles either.
+
+### Added
+- **`schedules` command and `scripts/schedule_audit.py`** — audits periodic
+  scans against the domains the database actually knows about. Reports each
+  schedule (interval, bound list, last/next run), coverage as a percentage,
+  the domains in no enabled schedule and therefore never rescanned, domains
+  duplicated across schedules, schedules bound to a missing or empty list,
+  disabled schedules, and overdue schedules (a good proxy for "the daemon is
+  not running"). Exit code 1 on any gap, so it works as a cron health check.
+- **`--create-weekly`** — maintains one auto-managed domain list containing
+  every known domain, driven by one weekly schedule. Idempotent: re-running
+  updates the list contents and interval in place rather than creating
+  duplicates, so it is safe to run from cron to keep coverage complete as new
+  domains appear. `--dry-run` and `--interval-hours` supported.
+- **`scan --rescan-all`** — rescans every domain known to the database (domain
+  lists, past assessments, organisation assignments). This is the supported way
+  to pick up new checks after an upgrade.
+- **`ScanScheduler.reload()`** — re-reads `scheduled_scans` and reconciles
+  registered jobs, so a schedule created by the audit tool is picked up without
+  restarting the service. The daemon calls it on a configurable tick
+  (`scheduling.reload_interval_minutes`, default 60). Unchanged jobs are left
+  alone: re-registering uses `replace_existing=True`, which recomputes
+  `next_run_time` from now, so blindly re-registering a 168h job every hour
+  would reset its clock and it would never fire.
+- **Post-run database health gate** — `scheduling.post_run_db_check` (default
+  true) runs the read-only consistency audit after each scheduled scan. Error
+  level findings are logged and mark the run `completed_with_errors`. It can
+  never raise: a broken health check must not lose results already written.
+- 12 new tests (63 total) covering coverage reporting, orphan/disabled/overdue
+  detection, duplicate coverage, idempotent `--create-weekly`, multi-profile
+  scheduled runs, run-time bookkeeping, the health gate, and the
+  `--rescan-all` guard rails.
+
+### Fixed
+- **Scheduled scans now assess against every installed profile.** `_run_scheduled_scan`
+  called `assess_domain(scan, self.config)`, so only the default profile
+  (`nist_800_177r1`) was persisted. The CLI has used `assess_all_profiles`
+  since 0.3.0, so BSI, ACN and CCN-CERT dashboards went progressively stale
+  even while scheduling worked perfectly. Configurable via
+  `scheduling.profiles` (empty = all installed).
+- **`next_run_at` is now maintained.** It was written once at schedule creation
+  and never updated, so the stored value drifted from reality as soon as the
+  first run happened. It is now taken from the live APScheduler job after each
+  run, falling back to `now + interval` when the scheduler is not running.
+- A schedule whose domain list is empty now records its run timestamps instead
+  of returning early and appearing to have never run.
+
+### Configuration
+New `scheduling` block: `profiles`, `post_run_db_check`,
+`reload_interval_minutes`. All optional with safe defaults.
+
+### Upgrade note
+`scan --rescan-all` is still required once after upgrading from 0.5.x — the
+scheduler will pick the new checks up on its own cycle, but that is up to a
+week away, and `reassess_all.py` cannot help because the stored 0.5.x scans
+contain none of the new data.
+
 ## [0.6.0] — 2026-07-24
 
 Assessment-depth release. The scanner previously answered "is the record

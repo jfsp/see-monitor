@@ -31,6 +31,19 @@ scanning:
                           # exhaustive coverage; this is the main driver of
                           # query volume in a community-wide scan.
 
+# --- Scheduling -----------------------------------------------------------
+scheduling:
+  profiles: []                  # empty = assess against every installed
+                                # profile, matching the CLI. Before 0.6.1
+                                # scheduled runs scored only the default
+                                # profile, so national dashboards went stale.
+  post_run_db_check: true       # run the read-only consistency audit after
+                                # each scheduled scan; error-level findings are
+                                # logged and mark the run completed_with_errors
+  reload_interval_minutes: 60   # how often the daemon re-reads scheduled_scans,
+                                # so schedules added by scripts/schedule_audit.py
+                                # are picked up without a service restart
+
 # --- Reputation / blocklists ----------------------------------------------
 # Enabled by default and uses ordinary DNS lookups against public zones.
 # NOTE: Spamhaus and others refuse queries arriving from public resolvers or
