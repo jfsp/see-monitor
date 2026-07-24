@@ -432,6 +432,69 @@ def test_report_pdf_endpoints():
         assert r.get_data()[:4] == b"%PDF"
 
 
+def test_db_check_soundness():
+    import sqlite3
+    from scripts.db_check import run_checks
+    path = tempfile.mktemp(suffix=".db")
+    db = Database(path)
+    run = db.create_run(["a.com"])
+    db.save_scan_result(run, {"domain": "a.com", "scanned_at": "2026-06-10T00:00:00+00:00",
+                              "checks": {"spf": {"present": True}}})
+    db.save_assessment(run, _mk_assessment("a.com", "2026-06-10T00:00:00+00:00",
+                                           80, "strong"))
+    db.finish_run(run)
+
+    # Clean DB: no errors.
+    assert not [i for i in run_checks(path) if i.level == "error"]
+
+    # Inject inconsistencies via a raw connection (FK enforcement off).
+    c = sqlite3.connect(path)
+    c.execute("PRAGMA foreign_keys=OFF")
+    c.execute("INSERT INTO raw_scans(run_id,domain,scanned_at,checks_json) "
+              "VALUES('MISSING','x.com','t','{}')")               # FK orphan
+    c.execute("INSERT INTO assessments(run_id,domain,assessed_at,guideline,"
+              "score,rating,no_mail,controls_json,findings_json) VALUES"
+              "(?, 'bad.com','t','nist_800_177r1',50,'medium',0,'{no','[]')",
+              (run,))                                             # bad JSON
+    c.execute("INSERT INTO assessments(run_id,domain,assessed_at,guideline,"
+              "score,rating,no_mail,controls_json,findings_json) VALUES"
+              "(?, 'z.com','t','made_up',175,'wat',5,'{}','[]')", (run,))
+    c.commit()
+    c.close()
+
+    checks = {i.check for i in run_checks(path)}
+    assert {"foreign_key_check", "json", "values"} <= checks
+    assert any(i.level == "error" for i in run_checks(path))
+
+
+def test_db_check_data_relations():
+    import sqlite3
+    os.environ["SEE_SECRET_KEY"] = "d" * 32
+    from scripts.db_check import run_checks
+    path = tempfile.mktemp(suffix=".db")
+    Database(path)
+    from app_factory import create_app
+    create_app({"db_path": path, "scanning": {"active_smtp": False}})  # users+admin
+
+    c = sqlite3.connect(path)
+    now = "2026-07-22T00:00:00+00:00"
+    c.execute("INSERT INTO users(username,email,password_hash,role,is_active,"
+              "created_at) VALUES('ana','a@x','h','analyst',1,?)", (now,))
+    c.execute("INSERT INTO communities(name,created_at) VALUES('Empty',?)", (now,))
+    c.execute("INSERT INTO assessments(run_id,domain,assessed_at,guideline,score,"
+              "rating,no_mail,controls_json,findings_json) VALUES"
+              "(NULL,'lonely.com',?, 'nist_800_177r1',50,'medium',0,'{}','[]')",
+              (now,))
+    c.commit()
+    c.close()
+
+    seen = {i.check for i in run_checks(path)}
+    assert "data.analyst_no_org" in seen
+    assert "data.empty_community" in seen
+    assert "data.domain_no_org" in seen
+    assert "data.no_active_admin" not in seen        # default admin is active
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

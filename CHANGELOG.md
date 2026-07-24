@@ -4,6 +4,23 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.5.1] — 2026-07-21
+
+### Added
+- **DB schema documentation** — `docs/DATABASE.md`: every table (both the
+  `data/database.py` and `auth/store.py` owners), columns, keys, declared vs
+  soft foreign keys, JSON column shapes, relationships, schema-version history,
+  and how to run the consistency checker.
+- **Database consistency checker** — `scripts/db_check.py` (stdlib only,
+  read-only `mode=ro`): `PRAGMA integrity_check` + `foreign_key_check`, schema
+  version, orphan detection for declared and soft references, `_json` column
+  validation, and assessment value-domain checks (score range, boolean
+  `no_mail`, installed guideline, in-band rating). Text/`--json` output,
+  `--strict`; exit 0/1/2. Test-locked (`test_db_check_soundness`).
+
+### Notes
+- No application/schema change; version bump reflects tooling + docs. 23 tests.
+
 ## [0.5.0] — 2026-07-21
 
 ### Added

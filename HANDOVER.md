@@ -1,6 +1,10 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.5.0 · **Status:** functional, all tests passing (22) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.5.1 · **Status:** functional, all tests passing (23) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+
+> Final handover for this session. Recent additions are summarised in
+> `CHANGELOG.md` (0.3.0 profiles → 0.4.0 status dashboards + trends → 0.5.0 PDF
+> export → 0.5.1 DB consistency checker + schema doc).
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -32,14 +36,15 @@ shows all profiles (`--profile` to limit).
 
 ## 2. Where things live
 
-- **Working source (ephemeral):** `/home/claude/see-monitor` — resets between
-  sessions. Do not rely on it persisting.
-- **Deliverable (persistent):** `see-monitor-0.2.0.zip` in the outputs area.
+- **Working source (ephemeral):** `/home/claude/see/see-monitor` — resets
+  between sessions. Do not rely on it persisting.
+- **Deliverable (persistent):** `see-monitor-0.5.1.zip` in the outputs area.
   **Start a new session by extracting this zip.**
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
 
-Run tests: `python3 -m pytest tests/test_smoke.py -q` (22 passing).
+Run tests: `python3 -m pytest tests/test_smoke.py -q` (23 passing).
+DB audit:  `python3 scripts/db_check.py --db data/see_monitor.db` (read-only).
 Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycache__*")`.
 
 ---
@@ -72,17 +77,20 @@ scanner/
                         (guideline_id), required_signals gating, assess_all_profiles
 data/
   database.py           SQLite schema v2 + full data-access API; get_timeline()
+docs/DATABASE.md        authoritative schema reference (KEEP CURRENT on changes)
   geo_inference.py, tld_geo.csv   country tagging (reused)
 roadmap/generator.py    per-domain + group roadmaps
-reports/report_generator.py  CSV/JSON export
-  reports/pdf_report.py        reportlab scope + trend PDF reports (profile-aware)
+reports/
+  report_generator.py   CSV/JSON export
+  pdf_report.py         reportlab scope + trend PDF reports (profile-aware)
 guidelines/*.json       scoring profiles: nist_800_177r1 (default) +
                         bsi_tr03182, acn_email, ccn_cert_bp02
 auth/ admin/ scheduler/ reused from pqc-monitor, rewired to the new DB API
 ```
 
 Ops: `install.sh`, `scripts/{deploy,sync-tree,wait-for-db,fix-permissions}.sh`,
-`scripts/reassess_all.py`, `systemd/{web,scheduler,target,nginx,env}`,
+`scripts/reassess_all.py`, `scripts/db_check.py` (read-only consistency audit),
+`systemd/{web,scheduler,target,nginx,env}`,
 `.gitattributes`, `config/config.yaml.example`, `tests/test_smoke.py`.
 
 ---
@@ -114,6 +122,10 @@ Ops: `install.sh`, `scripts/{deploy,sync-tree,wait-for-db,fix-permissions}.sh`,
    `_dmarc` AD check are active/authoritative like the rest.
 9. **Profile conflicts are intentional.** ACN requires DMARC `ruf`; BSI forbids
    it (GDPR). Never "reconcile" them into one rule — they are per-profile.
+10. **`scripts/db_check.py` is read-only** (opens the DB `mode=ro`); it must
+   never mutate data. When the schema changes, update BOTH `SCHEMA_VERSION`
+   (+ migration) AND `docs/DATABASE.md`, and extend `db_check.py` if new
+   references/invariants are introduced.
 
 ---
 
@@ -184,14 +196,16 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 2. Decide/​implement env→config wiring for passive-source API keys (§5 gap).
 3. Verify DNSDumpster + SecurityTrails (+ Censys) live API request/response
    schemas; adjust clients if needed.
-4. Group **PDF/HTML** report export (CSV/JSON already exist in
-   `reports/report_generator.py`).
+4. ~~Group PDF report export~~ **DONE** (0.5.0, `reports/pdf_report.py` +
+   `/app/api/report/{pdf,trend.pdf}`). Optional: an HTML export variant.
 5. Admin UI screens for DKIM selector registration and scheduled scans (backend
    endpoints + scheduler already exist).
 6. Optional dedicated passive-DNS provider (Farsight/SecurityTrails tier) purely
    for broader selector coverage at scale.
-7. `CHANGELOG.md` (Keep a Changelog) — not yet created; see §9 for the 0.2.0
-   entries to seed it.
+7. ~~`CHANGELOG.md`~~ **DONE** — created and maintained (0.1.0–0.5.1).
+9. ~~DB schema doc + consistency checker~~ **DONE** (0.5.1, `docs/DATABASE.md`
+   + `scripts/db_check.py`). Wire `db_check` into CI / a scheduler health check
+   if desired.
 8. **Future feature, documented not coded:** PGP/S-MIME end-to-end detection via
    WKD/keyservers (see README "Future features").
 
@@ -200,8 +214,9 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 ## 9. Version & changelog convention
 
 - Version is single-sourced from the `VERSION` file (read by `version.py`).
-  This session bumped it to **0.2.0** (three `feat:` additions since 0.1.0:
-  DNSDumpster, SecurityTrails, richer CLI).
+  Now at **0.5.1**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
+  profiles) → 0.4.0 (status dashboards + trends) → 0.5.0 (PDF export) →
+  0.5.1 (DB consistency checker + schema doc). Full detail in `CHANGELOG.md`.
 - **Convention going forward:** every change ships with a Conventional-Commits
   changelog. The 0.1.0→0.2.0 commits are listed in the session notes; seed
   `CHANGELOG.md` from them when created. Commit trailer used:
@@ -211,9 +226,12 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 
 ## 10. First steps in the next session
 
-1. Extract `see-monitor-0.2.0.zip`; run the test suite to confirm a clean base.
-2. Pick from §8. The two cheapest high-value items are `SESSION_COOKIE_NAME`
-   (§6) and resolving the passive-key env/config gap (§5).
+1. Extract `see-monitor-0.5.1.zip`; run `pytest tests/test_smoke.py -q`
+   (expect 23 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
+   clean base.
+2. Pick from §8. Cheapest high-value items remain `SESSION_COOKIE_NAME` (§6)
+   and the passive-key env/config gap (§5).
 3. Before wiring real DNSDumpster/SecurityTrails keys, verify their current API
    docs (§7).
-4. Keep the §4 invariants intact; provide a commit changelog with the change.
+4. Keep the §4 invariants intact (now 10 items); update `docs/DATABASE.md` and
+   `CHANGELOG.md` with every change; commit with `Assisted-by: Claude (Anthropic)`.
