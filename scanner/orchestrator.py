@@ -69,6 +69,19 @@ class ScanOrchestrator:
             enabled=bool((cfg.get("crtsh") or {}).get("enabled", True)))
 
     # ------------------------------------------------------------------
+    def has_mail(self, domain: str) -> bool:
+        """
+        Cheap MX-only pre-check, sharing this orchestrator's DNS client (so the
+        answer is cached for the full scan that may follow). True when the
+        domain has at least one usable MX and is not an RFC 7505 null MX.
+
+        Callers use this to skip domains that receive no mail before doing the
+        full scan, unless the operator forces the scan.
+        """
+        domain = domain.strip().lower().rstrip(".")
+        mx = resolve_mx(domain, self.dns)
+        return mx["has_mx"] and not mx["null_mx"]
+
     def scan_domain(self, domain: str,
                     registered_selectors: list[str] | None = None) -> dict:
         """

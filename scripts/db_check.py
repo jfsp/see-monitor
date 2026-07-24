@@ -242,7 +242,9 @@ def _check_assessment_values(conn, out):
                 except Exception:
                     band_cache[guideline] = None       # unknown -> skip
             valid = band_cache[guideline]
-            if valid and rating not in valid:
+            # 'no_mail' is a cross-profile N/A rating for domains with no MX; it
+            # is applied by the assessor outside the guideline bands by design.
+            if valid and rating != "no_mail" and rating not in valid:
                 bad_rating.append(f"rowid={rowid} {guideline}:{rating}")
         if bad_rating:
             out.append(Issue("warn", "values",

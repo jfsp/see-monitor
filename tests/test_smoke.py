@@ -62,12 +62,15 @@ def test_very_strong():
     assert a["rating"] == "very_strong"
 
 
-def test_empty_domain_scores_zero():
+def test_empty_domain_is_rated_no_mail():
     scan = {"domain": "void.example", "scanned_at": "2026-01-01T00:00:00Z",
             "checks": {"mx": {"has_mx": False, "null_mx": False,
                               "mx_hosts": [], "invalid_records": []}}}
     a = assess_domain(scan)
-    assert a["rating"] == "not_implemented"
+    # A domain with no MX receives no mail: N/A, not "weak/not implemented".
+    assert a["rating"] == "no_mail"
+    assert a["no_mail"] is True
+    assert a["compliant"] is None
     # transport controls should be n/a for a domain with no MX
     assert a["control_scores"]["starttls"] is None
 
@@ -1486,3 +1489,246 @@ def test_import_end_to_end_writes_dated_log(monkeypatch):
         assert "Oesterreichische Nationalbank" in text
         assert "community 'EU' created" in text
         assert "[scan] skipped" in text
+
+
+# ======================================================================
+# v0.6.3 — no-mail handling: skip on scan, N/A rating, DB cleanup
+# ======================================================================
+
+def _no_mail_scan(domain="void.example", spf_deny_all=False):
+    checks = {
+        "mx": {"has_mx": False, "null_mx": False, "mx_hosts": [],
+               "invalid_records": []},
+        "spf": {"present": spf_deny_all, "valid": spf_deny_all,
+                "all_qualifier": "-" if spf_deny_all else "",
+                "records": (["v=spf1 -all"] if spf_deny_all else []),
+                "deny_all": spf_deny_all, "issues": []},
+        "dkim": {"status": "unknown", "present": False, "issues": []},
+        "dmarc": {"present": False, "issues": []},
+        "dnssec": {"signed": False, "issues": []},
+        "starttls": {"applicable": False, "total": 0, "supported_count": 0,
+                     "no_tls_count": 0, "unknown_count": 0, "hosts": {},
+                     "issues": []},
+        "dns_hygiene": {"caa": {"present": False},
+                        "nameservers": ["a.net", "b.net"],
+                        "ns_diverse": True, "issues": []},
+        "reputation": {"enabled": True, "applicable": False, "issues": []},
+        "subdomains": {"applicable": False, "issues": []},
+    }
+    return {"domain": domain, "scanned_at": "2026-07-24T00:00:00Z",
+            "checks": checks}
+
+
+def test_no_mail_excluded_from_summary_average():
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(os.path.join(tmp, "s.db"))
+        run = db.create_run(["a", "b"])
+        db.save_assessment(run, assess_domain(_no_mail_scan("void.example")))
+        db.save_assessment(run, assess_domain(_strong_scan()))
+
+        st = db.get_summary_stats(guideline="nist_800_177r1")
+        # The no-mail domain is counted but not averaged.
+        assert st["ratings"]["no_mail"] == 1
+        assert st["mail_domains"] == 1
+        assert st["no_mail_domains"] == 1
+        assert st["avg_score"] == 100.0        # only the strong domain counts
+
+
+def test_find_no_mail_distinguishes_empty_from_parked():
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(os.path.join(tmp, "s.db"))
+        run = db.create_run(["a", "b", "c"])
+        db.save_assessment(run, assess_domain(_no_mail_scan("empty.example")))
+        db.save_assessment(run, assess_domain(
+            _no_mail_scan("parked.example", spf_deny_all=True)))
+        db.save_assessment(run, assess_domain(_strong_scan()))  # has mail
+
+        empty = [d["domain"] for d in db.find_no_mail_domains(empty_only=True)]
+        assert empty == ["empty.example"]      # parked one publishes SPF -all
+        allnm = {d["domain"] for d in db.find_no_mail_domains(empty_only=False)}
+        assert allnm == {"empty.example", "parked.example"}
+
+
+def test_purge_domains_removes_all_traces():
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(os.path.join(tmp, "s.db"))
+        run = db.create_run(["void.example"])
+        db.save_scan_result(run, _no_mail_scan("void.example"))
+        db.save_assessment(run, assess_domain(_no_mail_scan("void.example")))
+        org = db.create_organisation(name="Org")
+        db.set_org_domains(org, ["void.example", "keep.example"])
+        lid = db.save_domain_list("L", ["void.example", "keep.example"])
+
+        assert "void.example" in db.get_all_known_domains()
+        counts = db.purge_domains(["void.example"])
+        assert counts["assessments"] == 1
+        assert counts["raw_scans"] == 1
+        assert counts["domain_organisations"] == 1
+        assert counts["lists_updated"] == 1
+
+        assert "void.example" not in db.get_all_known_domains()
+        assert db.get_org_domains(org) == ["keep.example"]
+        assert db.get_domain_list_by_id(lid) == ["keep.example"]
+
+
+def test_purge_leaves_other_domains_untouched():
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(os.path.join(tmp, "s.db"))
+        run = db.create_run(["a", "b"])
+        db.save_assessment(run, assess_domain(_no_mail_scan("void.example")))
+        db.save_assessment(run, assess_domain(_strong_scan()))
+        db.purge_domains(["void.example"])
+        remaining = db.get_latest_assessments(["example.com"])
+        assert len(remaining) == 1
+        assert remaining[0]["domain"] == "example.com"
+
+
+def test_scan_skips_no_mx_domains_unless_forced(monkeypatch):
+    """--force off: no-MX domains are skipped and never persisted."""
+    from click.testing import CliRunner
+    import see_monitor
+
+    class FakeOrch:
+        securitytrails = dnsdumpster = shodan = censys = type(
+            "S", (), {"available": False})()
+
+        def __init__(self, *a, **k):
+            pass
+
+        def has_mail(self, domain):
+            return domain == "haasmail.example"
+
+        def scan_domain(self, domain):
+            return _strong_scan()   # only called for the mail domain
+
+    with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setattr(
+            see_monitor, "load_config",
+            lambda *a, **k: {"db_path": os.path.join(tmp, "s.db")})
+        import scanner.orchestrator as _orch_mod
+        monkeypatch.setattr(_orch_mod, "ScanOrchestrator", FakeOrch)
+
+        res = CliRunner().invoke(see_monitor.cli, [
+            "scan", "haasmail.example", "nomx.example", "--json"])
+        assert res.exit_code == 0
+        import json as _json
+        # Find the JSON payload in the output.
+        payload = _json.loads(res.output[res.output.index("{"):])
+        assert payload["skipped_no_mx"] == ["nomx.example"]
+        assert len(payload["results"]) == 1
+        assert payload["results"][0]["domain"] == "haasmail.example"
+
+
+def test_scan_force_includes_no_mx_domains(monkeypatch):
+    from click.testing import CliRunner
+    import see_monitor
+
+    class FakeOrch:
+        securitytrails = dnsdumpster = shodan = censys = type(
+            "S", (), {"available": False})()
+
+        def __init__(self, *a, **k):
+            pass
+
+        def has_mail(self, domain):
+            return False
+
+        def scan_domain(self, domain):
+            return _no_mail_scan(domain)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setattr(
+            see_monitor, "load_config",
+            lambda *a, **k: {"db_path": os.path.join(tmp, "s.db")})
+        import scanner.orchestrator as _orch_mod
+        monkeypatch.setattr(_orch_mod, "ScanOrchestrator", FakeOrch)
+        res = CliRunner().invoke(see_monitor.cli, [
+            "scan", "nomx.example", "--force", "--json"])
+        assert res.exit_code == 0
+        import json as _json
+        payload = _json.loads(res.output[res.output.index("{"):])
+        assert "skipped_no_mx" not in payload
+        assert payload["results"][0]["domain"] == "nomx.example"
+
+
+def test_prune_script_dry_run_changes_nothing(monkeypatch):
+    import scripts.prune_no_mail as prune
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "s.db")
+        db = Database(db_path)
+        run = db.create_run(["void.example"])
+        db.save_assessment(run, assess_domain(_no_mail_scan("void.example")))
+
+        monkeypatch.setattr(sys, "argv", [
+            "prune_no_mail.py", "--db", db_path,
+            "--config", os.path.join(tmp, "missing.yaml"), "--dry-run"])
+        assert prune.main() == 0
+        assert "void.example" in db.get_all_known_domains()   # untouched
+
+
+def test_prune_script_removes_with_yes(monkeypatch):
+    import scripts.prune_no_mail as prune
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "s.db")
+        db = Database(db_path)
+        run = db.create_run(["void.example", "e"])
+        db.save_assessment(run, assess_domain(_no_mail_scan("void.example")))
+        db.save_assessment(run, assess_domain(_strong_scan()))
+
+        monkeypatch.setattr(sys, "argv", [
+            "prune_no_mail.py", "--db", db_path,
+            "--config", os.path.join(tmp, "missing.yaml"), "--yes"])
+        assert prune.main() == 0
+        known = db.get_all_known_domains()
+        assert "void.example" not in known
+        assert "example.com" in known           # the mail domain survives
+
+
+def test_prune_script_list_mode(monkeypatch):
+    import scripts.prune_no_mail as prune
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "s.db")
+        db = Database(db_path)
+        run = db.create_run(["a", "b"])
+        db.save_assessment(run, assess_domain(_no_mail_scan("bad1.example")))
+        db.save_assessment(run, assess_domain(_no_mail_scan("bad2.example")))
+        list_path = os.path.join(tmp, "bad.txt")
+        with open(list_path, "w", encoding="utf-8") as fh:
+            fh.write("# batch to drop\nbad1.example\nbad2.example\n")
+
+        monkeypatch.setattr(sys, "argv", [
+            "prune_no_mail.py", "--db", db_path,
+            "--config", os.path.join(tmp, "missing.yaml"),
+            "--list", list_path, "--yes"])
+        assert prune.main() == 0
+        assert db.get_all_known_domains() == []
+
+
+def test_prune_script_refuses_without_yes_or_dry_run(monkeypatch, capsys):
+    import scripts.prune_no_mail as prune
+    from data.database import Database
+    from scanner.assessor import assess_domain
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "s.db")
+        db = Database(db_path)
+        run = db.create_run(["void.example"])
+        db.save_assessment(run, assess_domain(_no_mail_scan("void.example")))
+        monkeypatch.setattr(sys, "argv", [
+            "prune_no_mail.py", "--db", db_path,
+            "--config", os.path.join(tmp, "missing.yaml")])
+        prune.main()
+        assert "void.example" in db.get_all_known_domains()   # not deleted

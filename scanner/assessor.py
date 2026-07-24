@@ -30,6 +30,13 @@ _GUIDELINE_DIR = os.path.join(os.path.dirname(__file__), "..", "guidelines")
 DEFAULT_GUIDELINE = "nist_800_177r1"
 RATING_ORDER = ["not_implemented", "medium", "strong", "very_strong"]
 
+# A domain with no MX (or an RFC 7505 null MX) does not receive email. Email
+# security is therefore not "weak", it is not applicable: such a domain is
+# rated with this dedicated value so dashboards and averages can set it apart
+# from domains that receive mail and score badly. It is not a band in any
+# profile — it overrides the band result.
+NO_MAIL_RATING = "no_mail"
+
 
 def _guideline_path(guideline_id: str) -> str:
     return os.path.join(_GUIDELINE_DIR, f"{guideline_id}.json")
@@ -573,6 +580,15 @@ def assess_domain(scan: dict, config: dict | None = None,
         if rating == top_rating and not _meets_very_strong(
                 checks, guideline["very_strong_requirements"]):
             rating = demote_to
+
+    # A domain that receives no mail is N/A, not weak: the email-security
+    # posture cannot be graded because there is no mail service to protect.
+    # The numeric score and per-control detail are kept (SPF/DMARC absence is
+    # still a real anti-spoofing fact), but the headline rating and compliance
+    # verdict are set to the no_mail state so nothing downstream miscounts it.
+    if no_mail:
+        rating = NO_MAIL_RATING
+        compliant = None
 
     return {
         "domain": scan.get("domain"),

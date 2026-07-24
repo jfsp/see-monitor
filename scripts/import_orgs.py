@@ -282,16 +282,34 @@ def apply_import(db, plan: dict, dry_run: bool = False,
 # ----------------------------------------------------------------------
 # Scanning
 # ----------------------------------------------------------------------
-def scan_domains(cfg, db, domains: list, log, profiles=None) -> dict:
+def scan_domains(cfg, db, domains: list, log, profiles=None,
+                 force: bool = False) -> dict:
     """Scan each domain, persist results, and write one log line per domain."""
     from scanner.orchestrator import ScanOrchestrator
     from scanner.assessor import assess_all_profiles, available_guidelines
 
     gids = profiles or available_guidelines()
     orch = ScanOrchestrator(cfg, db=db)
-    run_id = db.create_run(domains, trigger="import")
-    stats = {"run_id": run_id, "ok": 0, "failed": 0, "failures": []}
+    stats = {"run_id": None, "ok": 0, "failed": 0, "failures": [],
+             "skipped_no_mx": []}
 
+    # Domains with no MX receive no mail; skip them unless forced, so mistaken
+    # entries do not land in the database as empty "no email" assessments.
+    if not force:
+        kept = []
+        for d in domains:
+            (kept if orch.has_mail(d) else stats["skipped_no_mx"]).append(d)
+        if stats["skipped_no_mx"]:
+            log(f"[scan] skipping {len(stats['skipped_no_mx'])} domain(s) with "
+                f"no MX (use --force to scan): "
+                + ", ".join(stats["skipped_no_mx"]))
+        domains = kept
+    if not domains:
+        log("[scan] no mail-receiving domains to scan")
+        return stats
+
+    run_id = db.create_run(domains, trigger="import")
+    stats["run_id"] = run_id
     log(f"[scan] run {run_id}: {len(domains)} domain(s) x "
         f"{len(gids)} profile(s)")
     for domain in domains:
@@ -369,6 +387,9 @@ def main() -> int:
                     help="Limit scoring to specific profile(s); repeatable.")
     ap.add_argument("--no-scan", action="store_true",
                     help="Import and assign only; do not scan.")
+    ap.add_argument("--force", action="store_true",
+                    help="Scan domains even when they have no MX record "
+                         "(by default such domains are skipped).")
     ap.add_argument("--scan-only", action="store_true",
                     help="Scan the domains in the file without touching "
                          "organisations or communities.")
@@ -457,9 +478,11 @@ def main() -> int:
         if args.no_scan or args.dry_run:
             write("[scan] skipped")
         else:
-            stats = scan_domains(cfg, db, domains, write, args.profile)
+            stats = scan_domains(cfg, db, domains, write, args.profile,
+                                 force=args.force)
             write("")
-            write(f"[scan] {stats['ok']} ok, {stats['failed']} failed")
+            write(f"[scan] {stats['ok']} ok, {stats['failed']} failed, "
+                  f"{len(stats['skipped_no_mx'])} skipped (no MX)")
             if stats["failures"]:
                 write("[scan] failed: " + ", ".join(stats["failures"]))
                 exit_code = 1

@@ -85,7 +85,9 @@ _CTRL_LABEL = {"spf": "SPF", "dkim": "DKIM", "dmarc": "DMARC",
 _CONFIDENCE_COLOR = {"high": "green", "medium": "yellow", "low": "red"}
 _RATING_COLOR = {"not_implemented": "red", "medium": "yellow",
                  "strong": "cyan", "very_strong": "green",
-                 "partial": "yellow", "compliant": "green"}
+                 "partial": "yellow", "compliant": "green",
+                 "no_mail": "bright_black"}
+_RATING_LABEL = {"no_mail": "no email (N/A)"}
 
 
 def _glyph(score):
@@ -109,9 +111,10 @@ def _render_scan(scan: dict, a: dict, verbose: bool,
              + click.style(bar[len(a['domain']) + 4:], fg="bright_black"))
 
     rating = a["rating"]
+    rating_txt = _RATING_LABEL.get(rating, rating)
     conf = a.get("confidence", "high")
     L.append(f"  Score       {click.style(str(a['score']), bold=True)} / 100   "
-             + click.style(f"({rating})", fg=_RATING_COLOR.get(rating))
+             + click.style(f"({rating_txt})", fg=_RATING_COLOR.get(rating))
              + "   evidence: "
              + click.style(conf, fg=_CONFIDENCE_COLOR.get(conf)))
 
@@ -289,9 +292,12 @@ def _render_sources(svc: dict, indent: str) -> str:
               help="Rescan every domain already known to the database "
                    "(domain lists, past assessments, organisation "
                    "assignments). Use after upgrading to pick up new checks.")
+@click.option("--force", is_flag=True,
+              help="Scan domains even when they have no MX record. By default "
+                   "such domains are skipped (they receive no mail).")
 @click.pass_context
 def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
-         rescan_all):
+         rescan_all, force):
     """Scan and assess one or more domains.
 
     Default output is a per-domain summary showing what was found and which
@@ -343,6 +349,33 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
     else:
         primary_id = gids[0]
 
+    # Pre-filter domains that receive no mail, unless forced. This avoids
+    # persisting empty "no email" assessments for domains added by mistake.
+    skipped_no_mx = []
+    if not force:
+        kept = []
+        for d in targets:
+            if orch.has_mail(d):
+                kept.append(d)
+            else:
+                skipped_no_mx.append(d)
+        targets = kept
+        if skipped_no_mx and not as_json:
+            click.echo(click.style(
+                f"Skipping {len(skipped_no_mx)} domain(s) with no MX "
+                "(use --force to scan anyway): ", fg="yellow")
+                + ", ".join(skipped_no_mx[:10])
+                + ("" if len(skipped_no_mx) <= 10
+                   else f" (+{len(skipped_no_mx) - 10} more)"))
+            click.echo()
+        if not targets:
+            if as_json:
+                click.echo(json.dumps({"skipped_no_mx": skipped_no_mx,
+                                        "results": []}))
+            else:
+                click.echo("Nothing to scan: every domain lacked an MX record.")
+            return
+
     run_id = db.create_run(targets, trigger="cli")
     results = []
     for d in targets:
@@ -369,7 +402,10 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
             click.echo()
     db.finish_run(run_id)
     if as_json:
-        click.echo(json.dumps(results, indent=2))
+        payload = {"results": results}
+        if not force and skipped_no_mx:
+            payload["skipped_no_mx"] = skipped_no_mx
+        click.echo(json.dumps(payload, indent=2))
 
 
 @cli.command("scheduler-daemon")

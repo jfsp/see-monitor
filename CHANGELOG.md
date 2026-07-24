@@ -4,6 +4,65 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.6.3] — 2026-07-24
+
+Domains with no MX record receive no mail, so grading their email security as
+"weak" was misleading — there is nothing to grade. This release treats them as
+N/A, skips them on scan by default, and adds a tool to clean up the ones
+already stored.
+
+### Added
+- **`no_mail` rating.** A domain with no MX (or an RFC 7505 null MX) is now
+  rated `no_mail` — rendered "No email (N/A)" — instead of falling into the
+  weak/not-implemented band. The numeric score and per-control detail are kept
+  (an absent SPF/DMARC record is still a real anti-spoofing fact), but the
+  headline rating and the profile compliance verdict are set to N/A so nothing
+  downstream miscounts a mistakenly-added domain. Shown distinctly in the CLI,
+  the web dashboard (grey badge, its own legend entry) and PDF reports.
+- **`scan --force`.** By default the scanner now MX-pre-checks each target and
+  skips domains that receive no mail, so an accidental entry never lands in the
+  database as an empty assessment. `--force` scans them anyway. The skip list
+  is reported (and included in `--json` output). `scripts/import_orgs.py` gains
+  the same `--force` flag and skips no-MX domains from scanning by default.
+- **`scripts/prune_no_mail.py`** — removes no-mail/empty domains completely:
+  their raw scans, assessments, DKIM selectors, organisation assignments and
+  roadmaps are deleted, and they are stripped from every saved domain list.
+  Organisations, communities and schedules themselves are kept.
+  - DEFAULT: inspects the database and selects domains whose latest assessment
+    is `no_mail` *and* have no positive EMAIL signal (every email control 0 or
+    n/a). A parked domain publishing `v=spf1 -all` is kept — it is doing
+    something. Infrastructure controls (dns_hygiene, reputation, subdomains)
+    are ignored for this test, since a no-mail domain can still have healthy
+    nameservers and that is no reason to keep it.
+  - `--list FILE` removes exactly the domains listed, regardless of DB state,
+    warning about any that are unknown or that actually have mail.
+  - `--all-no-mail` relaxes DEFAULT to every no_mail domain.
+  - Refuses to delete without `--dry-run` or `--yes`, so an accidental run
+    cannot destroy anything.
+- New DB helpers: `find_no_mail_domains(empty_only=True)` and
+  `purge_domains(domains)` (per-table deletion counts + list updates).
+- Scoring aggregates exclude no-mail domains from averages. `get_summary_stats`
+  and the group/community/country aggregates count them in a separate `no_mail`
+  bucket and report `mail_domains` / `no_mail_domains`, so a handful of parked
+  domains cannot drag a community's average down.
+- `ScanOrchestrator.has_mail(domain)` — cheap MX-only pre-check sharing the
+  orchestrator's DNS client (cached for the full scan that may follow).
+- 12 new tests (84 total): the no_mail rating and compliance override, average
+  exclusion, empty-vs-parked discrimination, complete purge with other domains
+  left intact, scan-time skip and `--force`, and the prune CLI in DB, list,
+  dry-run and refuse-without-confirmation modes.
+
+### Changed
+- `assessments` averages and rating distributions now recognise the `no_mail`
+  state throughout the CLI, dashboard, PDF and DB aggregates.
+
+### Migration
+No schema change. Existing stored assessments already carry `no_mail`, so they
+render correctly as soon as the code is deployed; re-scanning is not required.
+To retro-actively rate stored no-mail domains as N/A rather than weak, run
+`scripts/reassess_all.py`. To remove them, run `scripts/prune_no_mail.py
+--dry-run` and then, if the selection looks right, without `--dry-run`.
+
 ## [0.6.2] — 2026-07-24
 
 ### Added

@@ -36,6 +36,7 @@ MUTED = HexColor("#8a97a8")
 
 _FALLBACK = {
     "not_implemented": ("Not implemented", "#d64545"),
+    "no_mail": ("No email (N/A)", "#8a8f98"),
     "medium": ("Medium", "#e0a030"),
     "strong": ("Strong", "#4a90d9"),
     "very_strong": ("Very strong", "#3aa76d"),

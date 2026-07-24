@@ -84,6 +84,32 @@ Two domains can share a rating while differing sharply here: a "partial" domain
 with `impersonation` 90 and `resilience` 30 needs completely different work
 from its mirror image.
 
+### Domains with no email (no MX)
+
+A domain with no MX record receives no mail, so it has no email-security posture
+to grade. Such domains are rated **"No email (N/A)"** rather than weak, are
+excluded from community/country averages, and are **skipped on scan by
+default**:
+
+```bash
+python3 see_monitor.py scan --list domains.txt          # no-MX domains skipped, reported
+python3 see_monitor.py scan --list domains.txt --force  # scan them anyway
+```
+
+To clean up no-mail domains already in the database (e.g. added by mistake):
+
+```bash
+python3 scripts/prune_no_mail.py --dry-run              # preview the selection
+python3 scripts/prune_no_mail.py --yes                  # remove empty no-mail domains
+python3 scripts/prune_no_mail.py --list bad.txt --yes   # remove a specific batch
+```
+
+The default selection is conservative: only no-mail domains with no positive
+email signal are chosen, so a deliberately parked domain publishing `v=spf1
+-all` is kept. Removal is complete — assessments, raw scans, DKIM selectors,
+organisation assignments, roadmaps and domain-list membership all go — but
+organisations, communities and schedules themselves are left intact.
+
 ### Bulk import of organisations
 
 `scripts/import_orgs.py` takes a CSV of `domain,organisation,country[,sector]`

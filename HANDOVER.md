@@ -1,6 +1,6 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.6.2 · **Status:** functional, all tests passing (74) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.6.3 · **Status:** functional, all tests passing (84) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 > Final handover for this session. Recent additions are summarised in
 > `CHANGELOG.md` (0.3.0 profiles → 0.4.0 status dashboards + trends → 0.5.0 PDF
@@ -8,7 +8,8 @@
 > depth: evidence model, certificate/DANE verification, DNS hygiene,
 > reputation, subdomain coverage, sub-scores** → **0.6.1 scheduler coverage:
 > multi-profile scheduled runs, schedule audit tool, `--rescan-all`** →
-> **0.6.2 bulk organisation import**).
+> **0.6.2 bulk organisation import** → **0.6.3 no-mail domains: N/A rating,
+> scan-time skip (`--force`), `prune_no_mail.py` cleanup**).
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -48,12 +49,12 @@ shows all profiles (`--profile` to limit).
 
 - **Working source (ephemeral):** `/home/claude/see/see-monitor` — resets
   between sessions. Do not rely on it persisting.
-- **Deliverable (persistent):** `see-monitor-0.6.2.zip` in the outputs area.
+- **Deliverable (persistent):** `see-monitor-0.6.3.zip` in the outputs area.
   **Start a new session by extracting this zip.**
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
 
-Run tests: `python3 -m pytest tests/test_smoke.py -q` (74 passing).
+Run tests: `python3 -m pytest tests/test_smoke.py -q` (84 passing).
 DB audit:  `python3 scripts/db_check.py --db data/see_monitor.db` (read-only).
 Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycache__*")`.
 
@@ -121,7 +122,7 @@ Ops: `install.sh`, `scripts/{deploy,sync-tree,wait-for-db,fix-permissions}.sh`,
 `scripts/reassess_all.py`, `scripts/db_check.py` (read-only consistency audit),
 `scripts/schedule_audit.py` (schedule coverage audit / `--create-weekly`),
 `scripts/import_orgs.py` (CSV bulk import: organisations, domains, community,
-scan + dated log),
+scan + dated log), `scripts/prune_no_mail.py` (remove no-mail/empty domains),
 `systemd/{web,scheduler,target,nginx,env}`,
 `.gitattributes`, `config/config.yaml.example`, `tests/test_smoke.py`.
 
@@ -204,7 +205,25 @@ scan + dated log),
    an import file that omits a domain must never remove it. Operators re-run
    these files with partial lists; a destructive import would silently drop
    organisation membership that was set elsewhere (web UI, earlier import).
-18. **`scripts/db_check.py` is read-only** (opens the DB `mode=ro`); it must
+18. **No-mail is N/A, not weak.** `no_mail` (no MX / RFC 7505 null MX) is a
+   dedicated rating that overrides the profile band and sets `compliant=None`.
+   It is not a band in any guideline JSON — it is applied in `assess_domain`
+   after band + compliance logic, and recognised in every renderer (CLI,
+   dashboard `RATING_LABEL`/`ratingOrder`, PDF) and in the DB averages, which
+   exclude it. Do not add it to the guideline `rating_bands`.
+19. **Scans skip no-MX domains unless forced.** `see_monitor.py scan` and
+   `scripts/import_orgs.py` MX-pre-check via `orchestrator.has_mail()` and skip
+   domains with no mail unless `--force`. This keeps mistaken entries out of
+   the DB. The pre-check shares the orchestrator DNS client so it is not an
+   extra round trip for domains that are then scanned.
+20. **Prune is complete but conservative.** `scripts/prune_no_mail.py` and
+   `db.purge_domains()` delete a domain from every per-domain table and strip
+   it from domain-list JSON, but never touch organisations, communities or
+   schedules themselves. The DB-inspection default selects only no-mail domains
+   with zero positive EMAIL signal (infrastructure controls ignored), so a
+   parked domain publishing SPF -all is preserved. The script refuses to write
+   without --yes or --dry-run.
+21. **`scripts/db_check.py` is read-only** (opens the DB `mode=ro`); it must
    never mutate data. When the schema changes, update BOTH `SCHEMA_VERSION`
    (+ migration) AND `docs/DATABASE.md`, and extend `db_check.py` if new
    references/invariants are introduced.
@@ -337,14 +356,15 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 ## 9. Version & changelog convention
 
 - Version is single-sourced from the `VERSION` file (read by `version.py`).
-  Now at **0.6.2**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
+  Now at **0.6.3**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
   profiles) → 0.4.0 (status dashboards + trends) → 0.5.0 (PDF export) →
   0.5.1 (DB consistency checker + schema doc) → 0.6.0 (assessment depth:
   evidence model, certificate/DANE verification, DNS hygiene, reputation,
   subdomain coverage, sub-scores) → 0.6.1 (scheduler coverage: multi-profile
   scheduled runs, schedule audit + `--create-weekly`, `scan --rescan-all`,
   post-run DB health gate) → 0.6.2 (bulk organisation import from CSV).
-  Full detail in `CHANGELOG.md`.
+  → 0.6.3 (no-mail domains rated N/A, skipped on scan unless --force,
+  prune_no_mail.py cleanup). Full detail in `CHANGELOG.md`.
 - **Convention going forward:** every change ships with a Conventional-Commits
   changelog. The 0.1.0→0.2.0 commits are listed in the session notes; seed
   `CHANGELOG.md` from them when created. Commit trailer used:
@@ -354,8 +374,8 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 
 ## 10. First steps in the next session
 
-1. Extract `see-monitor-0.6.2.zip`; run `pytest tests/test_smoke.py -q`
-   (expect 74 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
+1. Extract `see-monitor-0.6.3.zip`; run `pytest tests/test_smoke.py -q`
+   (expect 84 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
    clean base (the v2→v3 migration is applied on first `Database()` open).
 2. Pick from §8. Cheapest high-value items remain `SESSION_COOKIE_NAME` (§6)
    and the passive-key env/config gap (§5).

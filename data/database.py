@@ -394,15 +394,111 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
         return [self._parse_assessment_row(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Maintenance: no-mail discovery and complete removal
+    # ------------------------------------------------------------------
+    def find_no_mail_domains(self, empty_only: bool = True) -> list[dict]:
+        """
+        Domains whose most recent assessment (in any profile) has no_mail set.
+
+        empty_only=True (default) additionally requires that the domain carries
+        no positive EMAIL signal — every email-authentication and transport
+        control is 0 or n/a — so only genuinely empty, mistakenly-added domains
+        are returned and a deliberately parked domain that publishes, say, an
+        SPF -all record is kept. Infrastructure controls (dns_hygiene,
+        reputation, subdomains) are ignored here: a no-mail domain can still
+        have healthy nameservers, and that is not a reason to keep it.
+
+        Returns [{"domain", "score", "assessed_at", "guideline",
+                  "max_control_score"}].
+        """
+        email_controls = {"spf", "dkim", "dmarc", "dnssec", "dane",
+                          "mta_sts", "tlsrpt", "starttls", "bimi", "client_tls"}
+        out: list[dict] = []
+        seen: set[str] = set()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT a.domain, a.score, a.assessed_at, a.guideline, "
+                "a.controls_json, a.no_mail FROM assessments a "
+                "JOIN (SELECT domain, MAX(assessed_at) m FROM assessments "
+                "      GROUP BY domain) latest "
+                "ON a.domain=latest.domain AND a.assessed_at=latest.m "
+                "ORDER BY a.domain").fetchall()
+        for r in rows:
+            if r["domain"] in seen or not r["no_mail"]:
+                continue
+            seen.add(r["domain"])
+            controls = json.loads(r["controls_json"])
+            scores = [v for k, v in controls.items()
+                      if k in email_controls and isinstance(v, (int, float))]
+            max_score = max(scores) if scores else 0
+            if empty_only and max_score > 0:
+                continue
+            out.append({"domain": r["domain"], "score": r["score"],
+                        "assessed_at": r["assessed_at"],
+                        "guideline": r["guideline"],
+                        "max_control_score": max_score})
+        return out
+
+    def purge_domains(self, domains: list[str]) -> dict:
+        """
+        Remove all trace of the given domains from the database.
+
+        Deletes rows from every per-domain table (raw_scans, assessments,
+        dkim_selectors, domain_organisations, roadmaps) and strips the domains
+        out of every saved domain_lists JSON array. Organisations, communities
+        and schedules themselves are left intact — only the domain membership
+        is removed.
+
+        Returns per-table deletion counts plus 'lists_updated'.
+        """
+        targets = sorted({d.strip().lower().rstrip(".")
+                          for d in domains if d and d.strip()})
+        counts = {t: 0 for t in ("raw_scans", "assessments", "dkim_selectors",
+                                 "domain_organisations", "roadmaps")}
+        counts["lists_updated"] = 0
+        counts["domains"] = len(targets)
+        if not targets:
+            return counts
+
+        placeholders = ",".join("?" for _ in targets)
+        with self._connect() as conn:
+            for table in ("raw_scans", "assessments", "dkim_selectors",
+                          "domain_organisations", "roadmaps"):
+                cur = conn.execute(
+                    f"DELETE FROM {table} WHERE domain IN ({placeholders})",
+                    targets)
+                counts[table] = cur.rowcount
+
+            target_set = set(targets)
+            for row in conn.execute(
+                    "SELECT id, domains_json FROM domain_lists").fetchall():
+                current = json.loads(row["domains_json"])
+                kept = [d for d in current if d.lower() not in target_set]
+                if len(kept) != len(current):
+                    conn.execute(
+                        "UPDATE domain_lists SET domains_json=? WHERE id=?",
+                        (json.dumps(kept), row["id"]))
+                    counts["lists_updated"] += 1
+        return counts
+
     def get_summary_stats(self, domains: Optional[list] = None,
                           guideline: Optional[str] = DEFAULT_GUIDELINE_ID
                           ) -> dict:
         latest = self.get_latest_assessments(domains, guideline)
         ratings = {"not_implemented": 0, "medium": 0, "strong": 0,
-                   "very_strong": 0}
+                   "very_strong": 0, "no_mail": 0}
         control_impl: dict = {}
+        # Domains with no mail service are counted separately and excluded from
+        # the average, so a handful of parked/no-MX domains cannot drag a
+        # community score down (they receive no mail, so they cannot be
+        # "insecure" at receiving it).
+        scored = []
         for a in latest:
             ratings[a["rating"]] = ratings.get(a["rating"], 0) + 1
+            if a.get("no_mail"):
+                continue
+            scored.append(a["score"])
             for control, score in a["control_scores"].items():
                 if score is None:
                     continue
@@ -411,10 +507,10 @@ class Database:
                 c["applicable"] += 1
                 if score > 0:
                     c["implemented"] += 1
-        avg = round(sum(a["score"] for a in latest) / len(latest), 1) \
-            if latest else 0.0
-        return {"total_domains": len(latest), "ratings": ratings,
-                "avg_score": avg, "controls": control_impl}
+        avg = round(sum(scored) / len(scored), 1) if scored else 0.0
+        return {"total_domains": len(latest), "mail_domains": len(scored),
+                "no_mail_domains": len(latest) - len(scored),
+                "ratings": ratings, "avg_score": avg, "controls": control_impl}
 
     def get_timeline(self, domains: Optional[list] = None,
                      guideline: Optional[str] = DEFAULT_GUIDELINE_ID,
@@ -765,13 +861,17 @@ class Database:
         scores = []
         for org in orgs:
             assessments = self._org_latest_assessments(org["id"], guideline)
-            org_scores = [a["score"] for a in assessments]
+            # Averages are over mail-receiving domains only; no-mail domains
+            # are still listed and counted, just not averaged.
+            org_scores = [a["score"] for a in assessments if not a.get("no_mail")]
+            no_mail_n = sum(1 for a in assessments if a.get("no_mail"))
             entry = {
                 "id": org["id"], "name": org["name"],
                 "country_code": org.get("country_code", ""),
                 "country": org.get("country", ""),
                 "region": org.get("region", ""),
                 "domains": len(assessments),
+                "no_mail_domains": no_mail_n,
                 "avg_score": round(sum(org_scores) / len(org_scores), 1)
                 if org_scores else None,
                 "ratings": {},

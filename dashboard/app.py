@@ -58,6 +58,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .pill{display:inline-block;padding:.12rem .5rem;border-radius:20px;
         font-size:.72rem;font-weight:600;color:#0f1419}
   .r-not_implemented{background:var(--r-not);color:#fff}
+  .r-no_mail{background:#8a8f98;color:#fff}
   .r-medium{background:var(--r-med)}
   .r-strong{background:var(--r-strong);color:#fff}
   .r-very_strong{background:var(--r-vstrong);color:#fff}
@@ -154,9 +155,10 @@ const CTRL_LABEL = {spf:"SPF",dkim:"DKIM",dmarc:"DMARC",starttls:"STARTTLS",
   dnssec:"DNSSEC",dane:"DANE",mta_sts:"MTA-STS",tlsrpt:"TLS-RPT",bimi:"BIMI"};
 const RATING_LABEL = {not_implemented:"Not impl./Weak",medium:"Medium",
   strong:"Strong",very_strong:"Very strong",partial:"Partial",
-  compliant:"Compliant"};
+  compliant:"Compliant",no_mail:"No email (N/A)"};
 const RATING_COLOR = {not_implemented:"#d64545",medium:"#e0a030",
-  strong:"#4a90d9",very_strong:"#3aa76d",partial:"#e0a030",compliant:"#3aa76d"};
+  strong:"#4a90d9",very_strong:"#3aa76d",partial:"#e0a030",compliant:"#3aa76d",
+  no_mail:"#8a8f98"};
 const $ = s => document.querySelector(s);
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,
   c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -172,7 +174,11 @@ function guidelineBands(){                  // ascending by min_score
           {rating:"strong"},{rating:"very_strong"}];
 }
 // best rating first (for legends / stacked order)
-function ratingOrder(){ return guidelineBands().map(b=>b.rating).reverse(); }
+function ratingOrder(){
+  // no_mail is not a profile band; surface it last so no-email domains are
+  // shown separately rather than silently dropped from stacked bars/legends.
+  return guidelineBands().map(b=>b.rating).reverse().concat(["no_mail"]);
+}
 function ratingLabel(r){
   const b = guidelineBands().find(x=>x.rating===r);
   return (b&&b.label) || RATING_LABEL[r] || r;
