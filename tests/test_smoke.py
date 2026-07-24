@@ -326,6 +326,67 @@ def test_multiprofile_db_roundtrip():
     assert len({a["guideline"] for a in allp}) == 3
 
 
+def _mk_assessment(domain, ts, score, rating, gid="nist_800_177r1"):
+    return {"domain": domain, "assessed_at": ts, "guideline": gid,
+            "score": score, "rating": rating, "no_mail": False,
+            "control_scores": {"spf": score}, "findings": []}
+
+
+def test_timeline_bucketing():
+    path = tempfile.mktemp(suffix=".db")
+    db = Database(path)
+    run = db.create_run(["a.com", "b.com"])
+    for d, ts, sc, rt in [
+        ("a.com", "2026-06-01T10:00:00+00:00", 40, "medium"),
+        ("b.com", "2026-06-02T10:00:00+00:00", 20, "not_implemented"),
+        ("a.com", "2026-06-09T10:00:00+00:00", 70, "strong"),
+        ("a.com", "2026-07-01T10:00:00+00:00", 90, "very_strong"),
+    ]:
+        db.save_assessment(run, _mk_assessment(d, ts, sc, rt))
+    db.finish_run(run)
+
+    weekly = db.get_timeline(["a.com", "b.com"], "nist_800_177r1", "weekly")
+    labels = [b["label"] for b in weekly]
+    assert labels == ["2026-W23", "2026-W24", "2026-W27"]   # chronological
+    assert weekly[0]["avg_score"] == 30.0                   # mean of 40 & 20
+    assert weekly[0]["scans"] == 2 and weekly[0]["domains"] == 2
+    assert weekly[0]["ratings"] == {"medium": 1, "not_implemented": 1}
+
+    monthly = db.get_timeline(None, "nist_800_177r1", "monthly")
+    assert [b["label"] for b in monthly] == ["Jun 2026", "Jul 2026"]
+    assert monthly[0]["scans"] == 3
+
+    # scope filter honoured
+    only_a = db.get_timeline(["a.com"], "nist_800_177r1", "monthly")
+    assert only_a[0]["domains"] == 1
+
+
+def test_timeline_and_guidelines_api():
+    os.environ["SEE_SECRET_KEY"] = "y" * 32
+    path = tempfile.mktemp(suffix=".db")
+    db = Database(path)
+    run = db.create_run(["a.com"])
+    db.save_assessment(run, _mk_assessment(
+        "a.com", "2026-06-09T10:00:00+00:00", 80, "compliant", "bsi_tr03182"))
+    db.finish_run(run)
+
+    from app_factory import create_app
+    app = create_app({"db_path": path, "scanning": {"active_smtp": False}})
+    client = app.test_client()
+    client.post("/login", data={"username": "admin", "password": "changeme123"})
+
+    gl = client.get("/app/api/guidelines").get_json()
+    by_id = {g["id"]: g for g in gl}
+    assert by_id["nist_800_177r1"]["bands"]                 # bands exposed
+    assert len(by_id["bsi_tr03182"]["bands"]) == 3
+    assert by_id["bsi_tr03182"]["has_data"] is True
+
+    tl = client.get(
+        "/app/api/timeline?period=quarterly&guideline=bsi_tr03182").get_json()
+    assert tl["period"] == "quarterly"
+    assert tl["buckets"][0]["ratings"] == {"compliant": 1}
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

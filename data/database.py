@@ -39,6 +39,33 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+import datetime as _dt
+
+
+def _period_bucket(iso: str, period: str) -> tuple:
+    """Return (key, label, start_iso) for an assessed_at timestamp.
+
+    period: weekly (ISO week, default) | monthly | quarterly | yearly.
+    """
+    try:
+        d = _dt.date.fromisoformat((iso or "")[:10])
+    except ValueError:
+        d = _dt.date(1970, 1, 1)
+    if period == "yearly":
+        return (f"{d.year}", str(d.year), f"{d.year}-01-01")
+    if period == "quarterly":
+        q = (d.month - 1) // 3 + 1
+        return (f"{d.year}-Q{q}", f"{d.year} Q{q}",
+                f"{d.year}-{3 * (q - 1) + 1:02d}-01")
+    if period == "monthly":
+        return (f"{d.year}-{d.month:02d}", d.strftime("%b %Y"),
+                f"{d.year}-{d.month:02d}-01")
+    # weekly (ISO-8601 week starting Monday)
+    iso_y, iso_w, _ = d.isocalendar()
+    monday = _dt.date.fromisocalendar(iso_y, iso_w, 1)
+    return (f"{iso_y}-W{iso_w:02d}", f"{iso_y}-W{iso_w:02d}", monday.isoformat())
+
+
 class Database:
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
@@ -357,6 +384,51 @@ class Database:
             if latest else 0.0
         return {"total_domains": len(latest), "ratings": ratings,
                 "avg_score": avg, "controls": control_impl}
+
+    def get_timeline(self, domains: Optional[list] = None,
+                     guideline: Optional[str] = DEFAULT_GUIDELINE_ID,
+                     period: str = "weekly") -> list[dict]:
+        """Time-bucketed trend of assessments for a domain set + guideline.
+
+        Each bucket aggregates *every* assessment in the period (mean score +
+        rating counts across all scans), per the 'average across the period'
+        semantics. Buckets are returned chronologically.
+        """
+        if period not in ("weekly", "monthly", "quarterly", "yearly"):
+            period = "weekly"
+        sql = "SELECT domain, assessed_at, score, rating FROM assessments"
+        params: list = []
+        if guideline is not None:
+            sql += " WHERE guideline=?"
+            params.append(guideline)
+        sql += " ORDER BY assessed_at"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        allowed = {d.strip().lower() for d in domains} \
+            if domains is not None else None
+        buckets: dict = {}
+        for r in rows:
+            if allowed is not None and r["domain"] not in allowed:
+                continue
+            key, label, start = _period_bucket(r["assessed_at"], period)
+            b = buckets.setdefault(key, {
+                "period": key, "label": label, "start": start,
+                "scores": [], "ratings": {}, "domains": set()})
+            b["scores"].append(r["score"])
+            b["domains"].add(r["domain"])
+            b["ratings"][r["rating"]] = b["ratings"].get(r["rating"], 0) + 1
+
+        out = []
+        for key in sorted(buckets, key=lambda k: buckets[k]["start"]):
+            b = buckets[key]
+            out.append({
+                "period": b["period"], "label": b["label"], "start": b["start"],
+                "avg_score": round(sum(b["scores"]) / len(b["scores"]), 1)
+                if b["scores"] else 0.0,
+                "scans": len(b["scores"]), "domains": len(b["domains"]),
+                "ratings": b["ratings"]})
+        return out
 
     # ------------------------------------------------------------------
     # DKIM selectors

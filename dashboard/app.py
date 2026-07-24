@@ -61,6 +61,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .r-medium{background:var(--r-med)}
   .r-strong{background:var(--r-strong);color:#fff}
   .r-very_strong{background:var(--r-vstrong);color:#fff}
+  .r-partial{background:var(--r-med)}
+  .r-compliant{background:var(--r-vstrong);color:#fff}
   .bar{height:8px;border-radius:4px;background:var(--panel2);overflow:hidden}
   .bar>span{display:block;height:100%}
   .ctrlrow{display:flex;align-items:center;gap:.6rem;margin:.3rem 0}
@@ -89,6 +91,37 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   ul.acts li{margin:.15rem 0}
   .empty{color:var(--muted);text-align:center;padding:2rem}
   .flex{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+  /* status dashboards */
+  .statusbar{display:flex;height:26px;border-radius:6px;overflow:hidden;
+             background:var(--panel2);border:1px solid var(--border)}
+  .statusbar .seg{height:100%;cursor:pointer;transition:opacity .15s}
+  .statusbar .seg:hover{opacity:.8}
+  .statusbar.mini{height:12px;border-radius:3px}
+  .legend{display:flex;flex-wrap:wrap;gap:.8rem;margin-top:.6rem;font-size:.78rem}
+  .legend .legitem{display:flex;align-items:center;gap:.35rem;cursor:pointer}
+  .legend i{width:11px;height:11px;border-radius:2px;display:inline-block}
+  .legend b{font-weight:700}
+  .statuskpi{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.4rem}
+  .statuskpi .sk{flex:1;min-width:96px;background:var(--panel2);
+    border:1px solid var(--border);border-radius:6px;padding:.5rem .6rem}
+  .statuskpi .sk .n{font-size:1.5rem;font-weight:700;line-height:1}
+  .statuskpi .sk .l{font-size:.66rem;text-transform:uppercase;
+    letter-spacing:.4px;color:var(--muted);margin-top:.2rem}
+  .gsel{display:flex;align-items:center;gap:.4rem;margin-left:auto}
+  .gsel select{font-size:.82rem}
+  .trendwrap{overflow-x:auto}
+  svg.trend{width:100%;min-width:520px;height:auto;display:block}
+  svg.trend text{fill:var(--muted);font-size:10px}
+  svg.trend .axis{stroke:var(--border);stroke-width:1}
+  svg.trend .grid{stroke:var(--border);stroke-dasharray:2 3;opacity:.5}
+  svg.trend .scoreline{fill:none;stroke:var(--accent);stroke-width:2}
+  svg.trend .scoredot{fill:var(--accent)}
+  .periodsel{display:flex;gap:.25rem}
+  .periodsel button{background:none;border:1px solid var(--border);
+    color:var(--muted);padding:.25rem .6rem;border-radius:5px;cursor:pointer;
+    font-size:.78rem}
+  .periodsel button.active{background:var(--accent);color:#fff;
+    border-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -105,8 +138,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button data-view="domains">Domains</button>
   <button data-view="organisations">Organisations</button>
   <button data-view="groups">Group reports</button>
+  <button data-view="trends">Trends</button>
   <button data-view="roadmap">Roadmap</button>
   <button data-view="runs">Scans</button>
+  <span class="gsel">Standard:
+    <select id="gsel" onchange="setGuideline(this.value)"></select></span>
 </nav>
 <main id="main"><div class="empty">Loading…</div></main>
 
@@ -117,12 +153,42 @@ const CONTROLS = ["spf","dkim","dmarc","starttls","dnssec","dane",
 const CTRL_LABEL = {spf:"SPF",dkim:"DKIM",dmarc:"DMARC",starttls:"STARTTLS",
   dnssec:"DNSSEC",dane:"DANE",mta_sts:"MTA-STS",tlsrpt:"TLS-RPT",bimi:"BIMI"};
 const RATING_LABEL = {not_implemented:"Not impl./Weak",medium:"Medium",
-  strong:"Strong",very_strong:"Very strong"};
+  strong:"Strong",very_strong:"Very strong",partial:"Partial",
+  compliant:"Compliant"};
+const RATING_COLOR = {not_implemented:"#d64545",medium:"#e0a030",
+  strong:"#4a90d9",very_strong:"#3aa76d",partial:"#e0a030",compliant:"#3aa76d"};
 const $ = s => document.querySelector(s);
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,
   c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+// ---- Conformance profile (guideline) state --------------------------
+let GUIDELINE = "nist_800_177r1";
+let GUIDELINES = [];                       // [{id,name,bands,...}]
+function currentGuideline(){ return GUIDELINES.find(g=>g.id===GUIDELINE); }
+function guidelineBands(){                  // ascending by min_score
+  const g = currentGuideline();
+  if(g && g.bands && g.bands.length) return g.bands;
+  return [{rating:"not_implemented"},{rating:"medium"},
+          {rating:"strong"},{rating:"very_strong"}];
+}
+// best rating first (for legends / stacked order)
+function ratingOrder(){ return guidelineBands().map(b=>b.rating).reverse(); }
+function ratingLabel(r){
+  const b = guidelineBands().find(x=>x.rating===r);
+  return (b&&b.label) || RATING_LABEL[r] || r;
+}
+function ratingColor(r){
+  const b = guidelineBands().find(x=>x.rating===r);
+  return (b&&b.color) || RATING_COLOR[r] || "var(--muted)";
+}
+async function setGuideline(id){ GUIDELINE = id; render(); }
+
 async function api(path, opts){
+  // Auto-scope GET requests to the selected conformance profile.
+  if(!opts){
+    path += (path.includes("?")?"&":"?") + "guideline=" +
+            encodeURIComponent(GUIDELINE);
+  }
   const r = await fetch("/app/api"+path, opts);
   if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error||r.status);
   return r.json();
@@ -134,7 +200,38 @@ function scoreColor(v){
   if(v>=30) return "var(--r-med)";
   return "var(--r-not)";
 }
-function ratingPill(r){return `<span class="pill r-${r}">${RATING_LABEL[r]||r}</span>`;}
+function ratingPill(r){
+  return `<span class="pill" style="background:${ratingColor(r)};color:#fff">${
+    esc(ratingLabel(r))}</span>`;
+}
+// Segmented status-distribution bar. `link` => clicking a segment/legend
+// opens the domains list filtered to that rating.
+function statusBar(ratings, opts){
+  opts = opts||{};
+  const order = ratingOrder();
+  const total = order.reduce((s,r)=>s+(ratings[r]||0),0);
+  if(!total) return '<div class="muted">No assessments in scope.</div>';
+  const mini = opts.mini?" mini":"";
+  const clk = r => opts.link?` onclick="go('domains','${r}')"`:"";
+  const segs = order.map(r=>{
+    const n = ratings[r]||0; if(!n) return "";
+    return `<span class="seg" title="${esc(ratingLabel(r))}: ${n}"
+      style="width:${100*n/total}%;background:${ratingColor(r)}"${clk(r)}></span>`;
+  }).join("");
+  const legend = order.filter(r=>ratings[r]).map(r=>
+    `<span class="legitem"${clk(r)}><i style="background:${ratingColor(r)}"></i>${
+      esc(ratingLabel(r))} <b>${ratings[r]}</b> <span class="muted">(${
+      Math.round(100*ratings[r]/total)}%)</span></span>`).join("");
+  return `<div class="statusbar${mini}">${segs}</div>`+
+         (opts.mini?"":`<div class="legend">${legend}</div>`);
+}
+function statusKpis(ratings, total){
+  const order = ratingOrder();
+  const cards = order.map(r=>`<div class="sk"><div class="n"
+    style="color:${ratingColor(r)}">${ratings[r]||0}</div>
+    <div class="l">${esc(ratingLabel(r))}</div></div>`).join("");
+  return `<div class="statuskpi">${cards}</div>`;
+}
 function ctrlBar(label,v){
   const val = v==null?"n/a":Math.round(v);
   const w = v==null?0:v;
@@ -150,15 +247,20 @@ views.overview = async () => {
   const s = await api("/summary");
   const rd = s.ratings||{};
   const total = s.total_domains||0;
-  let cards = `
+  const g = currentGuideline();
+  const top = ratingOrder()[0];                 // best rating for this profile
+  const good = rd[top]||0;
+  const pctGood = total? Math.round(100*good/total):0;
+
+  const kpis = `
     <div class="panel"><h3>Domains assessed</h3><div class="kpi">${total}</div></div>
     <div class="panel"><h3>Average score</h3>
       <div class="kpi" style="color:${scoreColor(s.avg_score)}">${s.avg_score??0}
-      <small>/100</small></div></div>`;
-  for(const r of ["very_strong","strong","medium","not_implemented"]){
-    cards += `<div class="panel"><h3>${RATING_LABEL[r]}</h3>
-      <div class="kpi">${rd[r]||0}</div></div>`;
-  }
+      <small>/100</small></div></div>
+    <div class="panel"><h3>${esc(ratingLabel(top))}</h3>
+      <div class="kpi" style="color:${ratingColor(top)}">${good}
+      <small>/ ${total} (${pctGood}%)</small></div></div>`;
+
   let ctrls = "";
   for(const c of CONTROLS){
     const ci = (s.controls||{})[c]||{implemented:0,applicable:0};
@@ -169,28 +271,49 @@ views.overview = async () => {
       <div class="muted" style="font-size:.7rem;margin:-.15rem 0 .3rem 90px">
         ${ci.implemented}/${ci.applicable} domains</div>`;
   }
-  return `<div class="grid cards">${cards}</div>
+
+  return `<div class="grid cards">${kpis}</div>
+    <div class="panel" style="margin-top:1rem">
+      <h3>Status distribution — ${esc(g?g.name:GUIDELINE)}</h3>
+      ${total? statusBar(rd,{link:true})+statusKpis(rd,total)
+             : '<div class="empty">No assessments yet</div>'}
+      <div class="muted" style="font-size:.72rem;margin-top:.6rem">
+        Click a status to list those domains.</div>
+    </div>
     <div class="panel" style="margin-top:1rem"><h3>Control implementation rate</h3>
       ${total?ctrls:'<div class="empty">No assessments yet</div>'}</div>`;
 };
 
 let _domainCache = [];
-views.domains = async () => {
+views.domains = async (filterRating) => {
   const list = await api("/assessments");
   _domainCache = list;
   if(!list.length) return `<div class="panel"><div class="empty">
     No assessed domains yet. Scan some from the Scans tab.</div></div>`;
-  list.sort((a,b)=>a.score-b.score);
-  let rows = list.map(a=>`
+  let shown = list.slice().sort((a,b)=>a.score-b.score);
+  if(filterRating) shown = shown.filter(a=>a.rating===filterRating);
+  const chips = ["",...ratingOrder()].map(r=>{
+    const active = (r||"")===(filterRating||"");
+    const lbl = r? ratingLabel(r) : "All";
+    const bg = active? (r?ratingColor(r):"var(--accent)") : "transparent";
+    const col = active? "#fff" : "var(--muted)";
+    return `<button class="btn ghost" style="background:${bg};color:${col};
+      border-color:${r?ratingColor(r):'var(--border)'}"
+      onclick="go('domains'${r?`,'${r}'`:''})">${esc(lbl)}</button>`;
+  }).join("");
+  let rows = shown.map(a=>`
     <tr class="clickable" onclick="go('domain','${esc(a.domain)}')">
       <td>${esc(a.domain)}</td>
       <td><span style="color:${scoreColor(a.score)};font-weight:600">${a.score}</span></td>
       <td>${ratingPill(a.rating)}</td>
       <td class="muted">${a.no_mail?'<span class="tag">no mail</span>':''}</td>
     </tr>`).join("");
-  return `<div class="panel"><h3>Assessed domains (${list.length})</h3>
+  return `<div class="panel"><h3>Assessed domains — ${esc(GUIDELINE)}
+      (${shown.length}${filterRating?` of ${list.length}`:''})</h3>
+    <div class="flex" style="margin-bottom:.6rem">${chips}</div>
     <table><thead><tr><th>Domain</th><th>Score</th><th>Rating</th><th></th></tr>
-    </thead><tbody>${rows}</tbody></table></div>`;
+    </thead><tbody>${rows||'<tr><td class="muted">None with this status.</td></tr>'}
+    </tbody></table></div>`;
 };
 
 views.domain = async (domain) => {
@@ -204,6 +327,7 @@ views.domain = async (domain) => {
       ${a?`<span style="color:${scoreColor(a.score)};font-weight:700;font-size:1.2rem">${a.score}</span>`:''}
       <span class="spacer" style="margin-left:auto"></span>
       <button class="btn ghost" onclick="rescan('${esc(domain)}')">Re-scan</button>
+      <button class="btn ghost" onclick="go('trends','domain=${encodeURIComponent(domain)}','domain: ${esc(domain)}')">Trends</button>
       <button class="btn" onclick="go('roadmap','${esc(domain)}')">Roadmap</button>
     </div>`;
   if(!a){ return head + `<div class="empty">No assessment yet.</div></div>`; }
@@ -361,22 +485,182 @@ views.groupreport = async (kind, key, label) => {
   const d = await api(path);
   const t = d.totals||{};
   const rd = t.ratings||{};
-  let dist = ["very_strong","strong","medium","not_implemented"].map(r=>
-    `<span class="pill r-${r}" style="margin-right:.3rem">${RATING_LABEL[r]}: ${rd[r]||0}</span>`).join("");
-  let rows = (d.organisations||[]).sort((a,b)=>(a.avg_score??999)-(b.avg_score??999))
+  const g = currentGuideline();
+  const rows = (d.organisations||[]).slice()
+    .sort((a,b)=>(a.avg_score??999)-(b.avg_score??999))
     .map(o=>`<tr class="clickable" onclick="go('org',${o.id})">
       <td>${esc(o.name)}</td><td>${o.domains}</td>
-      <td style="color:${scoreColor(o.avg_score)}">${o.avg_score??'—'}</td></tr>`).join("");
+      <td style="color:${scoreColor(o.avg_score)}">${o.avg_score??'—'}</td>
+      <td style="min-width:120px">${
+        Object.keys(o.ratings||{}).length? statusBar(o.ratings,{mini:true})
+        :'<span class="muted">—</span>'}</td></tr>`).join("");
+  const scopeQ = kind==="community"?`community=${encodeURIComponent(key)}`
+               : kind==="country"?`country=${encodeURIComponent(key)}`
+               : `region=${encodeURIComponent(key)}`;
   return `<span class="back" onclick="go('groups')">← Group reports</span>
-    <div class="panel"><h3>${esc(label)} — ${kind}</h3>
-      <div class="flex"><div><b>${t.orgs||0}</b> orgs · <b>${t.domains||0}</b> domains ·
-        avg <span style="color:${scoreColor(t.avg_score)}">${t.avg_score||0}</span></div></div>
-      <div style="margin-top:.6rem">${dist}</div></div>
+    <div class="panel"><div class="flex" style="justify-content:space-between">
+        <h3 style="margin:0">${esc(label)} — ${kind} · ${esc(g?g.name:GUIDELINE)}</h3>
+        <button class="btn ghost" onclick="go('trends','${scopeQ}','${esc(label)}')">
+          View trends →</button></div>
+      <div class="flex" style="margin:.6rem 0"><b>${t.orgs||0}</b> orgs ·
+        <b>${t.domains||0}</b> domains · avg
+        <span style="color:${scoreColor(t.avg_score)}">${t.avg_score||0}</span></div>
+      ${t.domains? statusBar(rd,{link:false}) :'<div class="muted">No assessments.</div>'}
+    </div>
     <div class="panel" style="margin-top:1rem"><h3>Organisations</h3>
-      <table><thead><tr><th>Name</th><th>Domains</th><th>Avg</th></tr></thead>
+      <table><thead><tr><th>Name</th><th>Domains</th><th>Avg</th>
+        <th>Status distribution</th></tr></thead>
       <tbody>${rows||'<tr><td class="muted">None.</td></tr>'}</tbody></table>
       <button class="btn ghost" style="margin-top:.8rem"
         onclick="groupRoadmap('${kind}','${esc(key)}')">Group roadmap</button></div>`;
+};
+
+// ---- Trends (timeline) ----------------------------------------------
+let _trend = {scope:"", label:"all domains", period:"weekly"};
+let _scopeOpts = null;                       // cached [{value,label}]
+
+async function loadScopeOptions(){
+  if(_scopeOpts) return _scopeOpts;
+  const [comms,countries,regions] = await Promise.all([
+    api("/communities").catch(()=>[]),
+    api("/countries").catch(()=>[]),
+    api("/regions").catch(()=>[]),
+  ]);
+  const o = [{value:"",label:"All domains"}];
+  comms.forEach(c=>o.push({value:`community=${c.id}`,label:`Community: ${c.name}`}));
+  countries.forEach(c=>o.push({value:`country=${encodeURIComponent(c.country_code)}`,
+    label:`Country: ${c.country_code}`}));
+  regions.forEach(r=>o.push({value:`region=${encodeURIComponent(r.region)}`,
+    label:`Region: ${r.region}`}));
+  _scopeOpts = o; return o;
+}
+
+function drawTrend(buckets){
+  if(!buckets.length) return '<div class="empty">No assessment history in this scope yet.</div>';
+  const W=800,H=300,padL=44,padR=44,padT=14,padB=56;
+  const plotW=W-padL-padR, plotH=H-padT-padB, yB=padT+plotH;
+  const n=buckets.length, bandW=plotW/n, barW=Math.min(bandW*0.62,46);
+  const order=ratingOrder().slice().reverse();      // worst first (bottom)
+  let maxTotal=1;
+  buckets.forEach(b=>{const t=Object.values(b.ratings||{}).reduce((s,v)=>s+v,0);
+    if(t>maxTotal)maxTotal=t;});
+  const cx=i=>padL+bandW*(i+0.5);
+  const yCount=v=>yB-(v/maxTotal)*plotH;
+  const yScore=v=>yB-(v/100)*plotH;
+
+  // gridlines + left (count) axis
+  let g="";
+  const cTicks=4;
+  for(let i=0;i<=cTicks;i++){
+    const v=Math.round(maxTotal*i/cTicks), y=yCount(v);
+    g+=`<line class="grid" x1="${padL}" y1="${y}" x2="${padL+plotW}" y2="${y}"/>
+        <text x="${padL-6}" y="${y+3}" text-anchor="end">${v}</text>`;
+  }
+  // right (score) axis
+  [0,50,100].forEach(v=>{const y=yScore(v);
+    g+=`<text x="${padL+plotW+6}" y="${y+3}" text-anchor="start"
+         fill="var(--accent)">${v}</text>`;});
+
+  // stacked bars
+  let bars="";
+  buckets.forEach((b,i)=>{
+    let acc=0;
+    order.forEach(r=>{
+      const v=(b.ratings||{})[r]||0; if(!v) return;
+      const h=(v/maxTotal)*plotH, y=yCount(acc+v);
+      bars+=`<rect x="${cx(i)-barW/2}" y="${y}" width="${barW}" height="${h}"
+        fill="${ratingColor(r)}"><title>${esc(b.label)} — ${esc(ratingLabel(r))}: ${v}</title></rect>`;
+      acc+=v;
+    });
+  });
+  // score line + dots
+  const pts=buckets.map((b,i)=>`${cx(i)},${yScore(b.avg_score)}`).join(" ");
+  let dots=buckets.map((b,i)=>`<circle class="scoredot" cx="${cx(i)}"
+    cy="${yScore(b.avg_score)}" r="3"><title>${esc(b.label)} — avg ${b.avg_score}</title></circle>`).join("");
+  // x labels (thin out if crowded)
+  const step=Math.ceil(n/12);
+  let xl=buckets.map((b,i)=> i%step? "" :
+    `<text x="${cx(i)}" y="${yB+16}" text-anchor="middle">${esc(b.label)}</text>`).join("");
+
+  return `<div class="trendwrap"><svg class="trend" viewBox="0 0 ${W} ${H}"
+      preserveAspectRatio="xMidYMid meet">
+    ${g}
+    <line class="axis" x1="${padL}" y1="${yB}" x2="${padL+plotW}" y2="${yB}"/>
+    ${bars}
+    <polyline class="scoreline" points="${pts}"/>
+    ${dots}${xl}
+    <text x="${padL}" y="${H-6}" fill="var(--muted)">Bars: domain count per status · Line: avg score (0–100)</text>
+  </svg></div>`;
+}
+
+views.trends = async (scopeQ, label) => {
+  if(scopeQ!==undefined){ _trend.scope=scopeQ||""; _trend.label=label||"all domains"; }
+  const opts = await loadScopeOptions();
+  // Keep custom (e.g. single-domain) scopes selectable even if not in list.
+  const inList = opts.some(o=>o.value===_trend.scope);
+  const scopeSel = `<select id="tscope" onchange="trendScope(this.value)">
+    ${opts.map(o=>`<option value="${esc(o.value)}"${o.value===_trend.scope?' selected':''}>${esc(o.label)}</option>`).join("")}
+    ${inList?"":`<option value="${esc(_trend.scope)}" selected>${esc(_trend.label)}</option>`}
+  </select>`;
+  const periods=[["weekly","Weekly"],["monthly","Monthly"],
+                 ["quarterly","Quarterly"],["yearly","Yearly"]];
+  const pbtns=periods.map(([p,l])=>`<button class="${p===_trend.period?'active':''}"
+    onclick="trendPeriod('${p}')">${l}</button>`).join("");
+
+  let data;
+  try{
+    data = await api("/timeline?"+(_trend.scope?_trend.scope+"&":"")+"period="+_trend.period);
+  }catch(e){
+    return `<div class="panel"><div class="empty">Error: ${esc(e.message)}</div></div>`;
+  }
+  const b=data.buckets||[];
+  const g=currentGuideline();
+  // summary row
+  const first=b[0], last=b[b.length-1];
+  const delta=(first&&last)? Math.round((last.avg_score-first.avg_score)*10)/10 : 0;
+  const deltaTxt=b.length>1? `<span style="color:${delta>=0?'var(--r-vstrong)':'var(--r-not)'}">
+     ${delta>=0?'▲ +':'▼ '}${delta}</span> since ${esc(first.label)}`:'';
+  const legend = ratingOrder().map(r=>
+    `<span class="legitem"><i style="background:${ratingColor(r)}"></i>${esc(ratingLabel(r))}</span>`).join("")
+    + `<span class="legitem"><i style="background:var(--accent)"></i>Avg score</span>`;
+
+  let table = b.slice().reverse().map(x=>{
+    const dist=ratingOrder().map(r=>(x.ratings||{})[r]?`${ratingLabel(r)} ${x.ratings[r]}`:"")
+      .filter(Boolean).join(" · ");
+    return `<tr><td>${esc(x.label)}</td>
+      <td style="color:${scoreColor(x.avg_score)}">${x.avg_score}</td>
+      <td>${x.domains}</td><td>${x.scans}</td>
+      <td class="muted">${esc(dist)}</td></tr>`;}).join("");
+
+  return `<div class="panel">
+      <div class="flex" style="justify-content:space-between">
+        <h3 style="margin:0">Trends — ${esc(g?g.name:GUIDELINE)}</h3>
+        <div class="periodsel">${pbtns}</div>
+      </div>
+      <div class="flex" style="margin:.6rem 0">Scope: ${scopeSel}
+        <span class="muted">or domain:</span>
+        <input id="tdom" placeholder="example.com" style="width:180px"
+          onkeydown="if(event.key==='Enter')trendDomain(this.value)">
+        <button class="btn ghost" onclick="trendDomain($('#tdom').value)">Go</button>
+        <span class="muted">${data.domains==null?'all':data.domains} domain(s) · ${deltaTxt}</span>
+      </div>
+      ${drawTrend(b)}
+      <div class="legend" style="margin-top:.4rem">${legend}</div>
+    </div>
+    <div class="panel" style="margin-top:1rem"><h3>Per-period detail</h3>
+      <table><thead><tr><th>Period</th><th>Avg score</th><th>Domains</th>
+        <th>Scans</th><th>Status mix</th></tr></thead>
+      <tbody>${table||'<tr><td class="muted">No data.</td></tr>'}</tbody></table></div>`;
+};
+window.trendPeriod = p => { _trend.period=p; render(); };
+window.trendScope = v => {
+  const o=(_scopeOpts||[]).find(x=>x.value===v);
+  _trend.scope=v; _trend.label=o?o.label:v; render();
+};
+window.trendDomain = d => {
+  d=(d||"").trim().toLowerCase();
+  if(!d) return;
+  _trend.scope="domain="+encodeURIComponent(d); _trend.label="domain: "+d; render();
 };
 
 let _roadmapDomain = null;
@@ -474,7 +758,22 @@ async function render(){
 }
 document.querySelectorAll("#nav button").forEach(b=>
   b.onclick=()=>go(b.dataset.view));
-render();
+
+async function initGuidelines(){
+  try{
+    GUIDELINES = await api("/guidelines");
+  }catch(e){ GUIDELINES = []; }
+  const def = GUIDELINES.find(g=>g.is_default) || GUIDELINES[0];
+  if(def) GUIDELINE = def.id;
+  const sel = $("#gsel");
+  if(sel){
+    sel.innerHTML = GUIDELINES.map(g=>
+      `<option value="${esc(g.id)}"${g.id===GUIDELINE?' selected':''}>${
+        esc(g.name)}${g.has_data?'':' (no data)'}</option>`).join("")
+      || `<option>${esc(GUIDELINE)}</option>`;
+  }
+}
+(async ()=>{ await initGuidelines(); render(); })();
 </script>
 </body>
 </html>

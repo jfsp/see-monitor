@@ -93,7 +93,9 @@ def api_guidelines():
             g = load_guideline(None, gid)
             out.append({"id": gid, "name": g.get("name", gid),
                         "has_data": gid in present,
-                        "is_default": gid == DEFAULT_GUIDELINE_ID})
+                        "is_default": gid == DEFAULT_GUIDELINE_ID,
+                        "bands": sorted(g.get("rating_bands", []),
+                                        key=lambda b: b.get("min_score", 0))})
         except Exception:
             continue
     return jsonify(out)
@@ -339,6 +341,85 @@ def api_region_report(region):
     return jsonify(db.get_region_aggregate(
         region, allowed_org_ids=_allowed_org_ids(user, db),
         guideline=_guideline()))
+
+
+# ----------------------------------------------------------------------
+# Timeline / trends
+# ----------------------------------------------------------------------
+def _scope_domains(user, db):
+    """Resolve the RBAC-scoped domain set + a label from query params.
+
+    ?domain= | ?org= | ?community= | ?country= | ?region= | (default: all).
+    Returns (domains_or_None, label). None means 'all visible' (admins).
+    Raises PermissionError on a forbidden explicit scope.
+    """
+    allowed = _allowed_domains(user)          # None for admin
+    allowed_orgs = _allowed_org_ids(user, db)
+
+    def _restrict(domains):
+        if allowed is None:
+            return domains
+        return [d for d in domains if d in allowed]
+
+    domain = (request.args.get("domain") or "").strip().lower()
+    org_id = request.args.get("org", type=int)
+    community_id = request.args.get("community", type=int)
+    country = (request.args.get("country") or "").strip()
+    region = (request.args.get("region") or "").strip()
+
+    if domain:
+        if allowed is not None and domain not in allowed:
+            raise PermissionError
+        return [domain], domain
+    if org_id:
+        if allowed_orgs is not None and org_id not in allowed_orgs:
+            raise PermissionError
+        org = db.get_organisation(org_id) or {}
+        return _restrict(db.get_org_domains(org_id)), \
+            f"org: {org.get('name', org_id)}"
+    if community_id:
+        if not user.is_admin and community_id not in \
+                (getattr(user, "community_ids", []) or []):
+            raise PermissionError
+        return _restrict(db.get_community_domains(community_id)), \
+            f"community: {community_id}"
+    if country:
+        agg = db.get_country_aggregate(country, allowed_org_ids=allowed_orgs)
+        domains = []
+        for o in agg.get("organisations", []):
+            domains += db.get_org_domains(o["id"])
+        return _restrict(sorted(set(domains))), f"country: {country.upper()}"
+    if region:
+        agg = db.get_region_aggregate(region, allowed_org_ids=allowed_orgs)
+        domains = []
+        for o in agg.get("organisations", []):
+            domains += db.get_org_domains(o["id"])
+        return _restrict(sorted(set(domains))), f"region: {region}"
+    return (None if allowed is None else list(allowed)), "all domains"
+
+
+@app_bp.route("/api/timeline")
+@require_auth
+def api_timeline():
+    """Trend of assessments over time for a scope + guideline.
+
+    Query: period=weekly|monthly|quarterly|yearly, guideline=<id>, and one
+    optional scope (domain/org/community/country/region; default all visible).
+    """
+    user = current_user()
+    db = _db()
+    period = (request.args.get("period") or "weekly").lower()
+    try:
+        domains, label = _scope_domains(user, db)
+    except PermissionError:
+        return jsonify({"error": "forbidden"}), 403
+    guideline = _guideline()
+    series = db.get_timeline(domains, guideline=guideline, period=period)
+    return jsonify({
+        "scope": label, "guideline": guideline, "period": period,
+        "domains": None if domains is None else len(domains),
+        "buckets": series,
+    })
 
 
 # ----------------------------------------------------------------------

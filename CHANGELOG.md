@@ -4,6 +4,27 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.4.0] — 2026-07-21
+
+### Added
+- **Profile-aware status dashboards.** A **Standard** selector (NIST / BSI /
+  ACN / CCN) in the nav drives every view; all GET API calls are auto-scoped
+  with `?guideline=`. Overview and community/country/region reports are now
+  status dashboards: a segmented status-distribution bar + per-status KPIs,
+  with click-through from a status to the matching domains. Ratings, labels and
+  colours come from each guideline's `rating_bands` (new `bands` field on
+  `/app/api/guidelines`).
+- **Trends view (timeline).** New `Trends` tab and `GET /app/api/timeline`
+  (`period=weekly|monthly|quarterly|yearly`, default weekly; scope via
+  `domain|org|community|country|region`, default all visible). Inline SVG chart
+  plots stacked status distribution (bars) **and** average score (line) per
+  period; per-period detail table below. Reachable from a domain's detail page
+  and from every group report.
+- **DB:** `get_timeline(domains, guideline, period)` with ISO-week / month /
+  quarter / year bucketing; means and rating counts are aggregated across all
+  scans in each period.
+- Tests: timeline bucketing + timeline/guidelines API (20 passing).
+
 ## [0.3.0] — 2026-07-21
 
 ### Added
