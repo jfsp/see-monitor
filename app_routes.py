@@ -10,14 +10,16 @@ Copyright (C) 2026 SEE-Monitor Contributors
 AI-assisted development: portions generated with Claude (Anthropic)
 """
 
+import json
 import logging
+import os
 import threading
 
 from flask import (
     Blueprint, jsonify, request, render_template_string, current_app)
 
 from auth.middleware import (
-    require_auth, current_user, filter_assessments)
+    require_auth, require_admin, current_user, filter_assessments)
 from auth.models import ROLE_ADMIN
 
 logger = logging.getLogger(__name__)
@@ -99,6 +101,45 @@ def api_guidelines():
         except Exception:
             continue
     return jsonify(out)
+
+
+# ----------------------------------------------------------------------
+# Help / documentation
+# ----------------------------------------------------------------------
+# Help content is stored as a plain JSON file that ships and is edited
+# alongside the code (help/help_content.json), NOT in the database.  Keeping
+# it out of the DB means the HTML it contains is trusted-by-provenance: it can
+# only change through a code deploy, so there is no user-writable path that
+# could inject markup — the DB never carries HTML.
+_HELP_PATH = os.path.join(
+    os.path.dirname(__file__), "help", "help_content.json")
+_help_cache: dict = {}
+_help_mtime: float = 0.0
+
+
+def _load_help() -> dict:
+    """Load and cache the help JSON, reloading if the file changed on disk."""
+    global _help_cache, _help_mtime
+    try:
+        mtime = os.path.getmtime(_HELP_PATH)
+    except OSError:
+        return {}
+    if mtime != _help_mtime or not _help_cache:
+        try:
+            with open(_HELP_PATH, encoding="utf-8") as fh:
+                _help_cache = json.load(fh)
+            _help_mtime = mtime
+        except (OSError, ValueError):
+            logger.exception("Failed to load help content from %s", _HELP_PATH)
+            return {}
+    return _help_cache
+
+
+@app_bp.route("/api/help")
+@require_auth
+def api_help():
+    """Return the editable help topics (controls + general sections)."""
+    return jsonify(_load_help())
 
 
 @app_bp.route("/api/summary")
@@ -197,8 +238,12 @@ def _run_scan(app, run_id: str, domains: list[str]):
 
 
 @app_bp.route("/api/scan", methods=["POST"])
-@require_auth
+@require_admin
 def api_scan():
+    # Scanning is admin-only: each call spawns a live probing thread (DNS,
+    # SMTP, TLS) and writes results, so it is both a server-load and a
+    # data-integrity surface.  Analysts/community managers view results but
+    # never trigger scans.
     user = current_user()
     body = request.get_json(silent=True) or {}
     domains = [d.strip().lower().rstrip(".")
@@ -220,8 +265,9 @@ def api_scan():
 
 
 @app_bp.route("/api/runs")
-@require_auth
+@require_admin
 def api_runs():
+    # The Scans page (run history) is admin-only, mirroring api_scan.
     return jsonify(_db().list_runs(limit=20))
 
 

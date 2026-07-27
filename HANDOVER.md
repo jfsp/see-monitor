@@ -1,6 +1,6 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.6.4 · **Status:** functional, all tests passing (92) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.6.5 · **Status:** functional, all tests passing (97) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 > Final handover for this session. Recent additions are summarised in
 > `CHANGELOG.md` (0.3.0 profiles → 0.4.0 status dashboards + trends → 0.5.0 PDF
@@ -10,7 +10,9 @@
 > multi-profile scheduled runs, schedule audit tool, `--rescan-all`** →
 > **0.6.2 bulk organisation import** → **0.6.3 no-mail domains: N/A rating,
 > scan-time skip (`--force`), `prune_no_mail.py` cleanup** → **0.6.4 fix:
-> duplicate assessments after re-assessment; schema v4 uniqueness**).
+> duplicate assessments after re-assessment; schema v4 uniqueness** →
+> **0.6.5 fix: control-rate denominators, apostrophe-in-org-name; scanning
+> restricted to admins; sortable admin tables; file-based in-app help**).
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -50,12 +52,12 @@ shows all profiles (`--profile` to limit).
 
 - **Working source (ephemeral):** `/home/claude/see/see-monitor` — resets
   between sessions. Do not rely on it persisting.
-- **Deliverable (persistent):** `see-monitor-0.6.4.zip` in the outputs area.
+- **Deliverable (persistent):** `see-monitor-0.6.5.zip` in the outputs area.
   **Start a new session by extracting this zip.**
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
 
-Run tests: `python3 -m pytest tests/test_smoke.py -q` (92 passing).
+Run tests: `python3 -m pytest tests/test_smoke.py -q` (97 passing).
 DB audit:  `python3 scripts/db_check.py --db data/see_monitor.db` (read-only).
 Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycache__*")`.
 
@@ -239,6 +241,37 @@ scan + dated log), `scripts/prune_no_mail.py` (remove no-mail/empty domains),
    never mutate data. When the schema changes, update BOTH `SCHEMA_VERSION`
    (+ migration) AND `docs/DATABASE.md`, and extend `db_check.py` if new
    references/invariants are introduced.
+24. **Control-rate denominator = every mail domain that carries the control.**
+   `get_summary_stats` counts a mail domain toward a control's `applicable`
+   total whether or not the control could be scored; a `None` (unknown/absent)
+   control is *not implemented*, not *not applicable*. This is deliberate: the
+   Overview/org/group "implementation rate" answers "of all my mail domains, how
+   many have this working", so an undiscovered DKIM selector or a failed STARTTLS
+   probe must lower the rate, not vanish from the denominator. No-mail domains
+   are still excluded entirely (they never reach the loop). Do not re-add a
+   `continue` on `score is None`. The domain view compensates by showing *why*
+   each `—` occurred (derived from `checks`) plus the stored confidence notes, so
+   "not implemented" in the aggregate is always explainable per domain.
+25. **Scanning is admin-only.** `POST /app/api/scan` and `GET /app/api/runs` are
+   `@require_admin`. This is the primary server-load / data-integrity surface (a
+   scan spawns a live DNS/SMTP/TLS probing thread and writes results). The
+   frontend hides the *Scans* tab and *Re-scan* button for non-admins, but that
+   is cosmetic — the backend guard is the control. DKIM selector add/delete stay
+   available to analysts, scoped to their assigned domains, and must remain so.
+26. **Help HTML is file-based, never DB-stored.** `help/help_content.json` is the
+   single source for in-app help, served read-only by `GET /app/api/help`
+   (mtime-cached). Its `body` fields are rendered as HTML in the client, which is
+   safe *only because* the file changes exclusively via deploy — it is
+   trusted-by-provenance. Never move help content into the database or populate
+   it from user input: that would turn stored data into rendered markup (XSS).
+   Keep bodies to `<p>`/`<ul>`/`<li>`/`<code>`/`<a target="_blank" rel="noopener">`.
+27. **Inline `on*` handlers embed dynamic strings via `jss()`.** HTML-escaping a
+   value into an `onclick` string is *not* safe: the browser decodes entities
+   (`&#39;`→`'`) before the JS parser runs, so a name like `Banca d'Italia`
+   breaks the handler (the 0.6.5 apostrophe bug). Use `jss(v)` =
+   `esc(JSON.stringify(v))` with no surrounding quotes:
+   `onclick="f(${jss(name)})"`. This is admin-panel JS only; the app dashboard
+   uses the same principle where needed.
 
 ---
 
@@ -385,7 +418,7 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 ## 9. Version & changelog convention
 
 - Version is single-sourced from the `VERSION` file (read by `version.py`).
-  Now at **0.6.4**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
+  Now at **0.6.5**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
   profiles) → 0.4.0 (status dashboards + trends) → 0.5.0 (PDF export) →
   0.5.1 (DB consistency checker + schema doc) → 0.6.0 (assessment depth:
   evidence model, certificate/DANE verification, DNS hygiene, reputation,
@@ -393,7 +426,9 @@ detail + per-service diagnostics (works before *or* after the subcommand);
   scheduled runs, schedule audit + `--create-weekly`, `scan --rescan-all`,
   post-run DB health gate) → 0.6.2 (bulk organisation import from CSV).
   → 0.6.3 (no-mail domains rated N/A, skipped on scan unless --force,
-  prune_no_mail.py cleanup) → 0.6.4 (fix: duplicate assessments; schema v4).
+  prune_no_mail.py cleanup) → 0.6.4 (fix: duplicate assessments; schema v4)
+  → 0.6.5 (fix: control-rate denominators, apostrophe-in-org-name; scanning
+  admin-only; sortable admin tables; file-based in-app help).
   Full detail in `CHANGELOG.md`.
 - **Convention going forward:** every change ships with a Conventional-Commits
   changelog. The 0.1.0→0.2.0 commits are listed in the session notes; seed
@@ -404,14 +439,15 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 
 ## 10. First steps in the next session
 
-1. Extract `see-monitor-0.6.4.zip`; run `pytest tests/test_smoke.py -q`
-   (expect 92 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
+1. Extract `see-monitor-0.6.5.zip`; run `pytest tests/test_smoke.py -q`
+   (expect 97 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
    clean base (the v2→v3 migration is applied on first `Database()` open).
 2. Pick from §8. Cheapest high-value items remain `SESSION_COOKIE_NAME` (§6)
    and the passive-key env/config gap (§5).
 3. Before wiring real DNSDumpster/SecurityTrails keys, verify their current API
    docs (§7).
-4. Keep the §4 invariants intact (now 15 items — 10 to 14 are new in 0.6.0 and
-   encode the evidence model, the probing boundary and the external-observer
-   principle); update `docs/DATABASE.md` and `CHANGELOG.md` with every change;
+4. Keep the §4 invariants intact (now 27 items — 24 to 27 are new in 0.6.5 and
+   encode the control-rate denominator, the admin-only scanning boundary, the
+   file-based/no-DB help/XSS boundary and the `jss()` inline-handler rule);
+   update `docs/DATABASE.md` and `CHANGELOG.md` with every change;
    commit with `Assisted-by: Claude (Anthropic)`.

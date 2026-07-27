@@ -555,12 +555,18 @@ class Database:
                 continue
             scored.append(a["score"])
             for control, score in a["control_scores"].items():
-                if score is None:
-                    continue
+                # A mail domain is "applicable" for every control it carries,
+                # regardless of whether the control could be scored.  A None
+                # score means the control was not confirmed (e.g. no DKIM
+                # selector discovered, STARTTLS probe failed, or an optional
+                # control such as BIMI is simply not published) — it still
+                # counts toward the denominator so the implementation rate is
+                # "of all my mail domains, how many have this control working",
+                # not "of the domains where I happened to confirm it".
                 c = control_impl.setdefault(
                     control, {"implemented": 0, "applicable": 0})
                 c["applicable"] += 1
-                if score > 0:
+                if score is not None and score > 0:
                     c["implemented"] += 1
         avg = round(sum(scored) / len(scored), 1) if scored else 0.0
         return {"total_domains": len(latest), "mail_domains": len(scored),

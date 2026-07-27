@@ -1925,3 +1925,122 @@ def test_unique_index_blocks_raw_duplicate_insert():
             n = conn.execute(
                 "SELECT COUNT(*) c FROM assessments").fetchone()["c"]
         assert n == 1
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.6.5 — control-rate denominator, scan lockdown, help endpoint, apostrophe fix
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_control_rate_counts_unconfirmed_as_applicable():
+    """A control that could not be confirmed (None) still counts toward the
+    'applicable' denominator, so DKIM shows 1/2 not 1/1 and BIMI 0/2 not 0/0."""
+    from scanner.dkim_check import check_dkim
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(os.path.join(tmp, "s.db"))
+
+        # Domain A: fully confirmed DKIM (scored > 0), BIMI not published.
+        scan_a = _strong_scan("a.example")
+        scan_a["checks"]["bimi"] = {"present": False, "issues": []}
+        a = assess_domain(scan_a)
+        assert a["control_scores"]["dkim"] and a["control_scores"]["dkim"] > 0
+        assert a["control_scores"]["bimi"] is None      # BIMI absent -> None
+
+        # Domain B: DKIM unknown (no selector discovered) -> None.
+        scan_b = _strong_scan("b.example")
+        scan_b["checks"]["bimi"] = {"present": False, "issues": []}
+        scan_b["checks"]["dkim"] = check_dkim("b.example", None, FakeDNS(),
+                                              True, None)
+        b = assess_domain(scan_b)
+        assert b["control_scores"]["dkim"] is None
+
+        run = db.create_run(["a.example", "b.example"])
+        db.save_scan_result(run, scan_a); db.save_assessment(run, a)
+        db.save_scan_result(run, scan_b); db.save_assessment(run, b)
+        db.finish_run(run)
+
+        controls = db.get_summary_stats()["controls"]
+        # Both mail domains are applicable for DKIM; only A implements it.
+        assert controls["dkim"]["applicable"] == 2
+        assert controls["dkim"]["implemented"] == 1
+        # BIMI is applicable everywhere but implemented nowhere (0/2, not 0/0).
+        assert controls["bimi"]["applicable"] == 2
+        assert controls["bimi"]["implemented"] == 0
+
+
+def _app_with_analyst(tmp):
+    """Create an app plus a non-admin analyst user, returning (app, client)."""
+    os.environ["SEE_SECRET_KEY"] = "x" * 32
+    from app_factory import create_app
+    from auth.models import ROLE_ANALYST
+    app = create_app({"db_path": os.path.join(tmp, "s.db"),
+                      "scanning": {"active_smtp": False}})
+    store = app.config["AUTH_STORE"]
+    store.create_user("analyst1", "a@example.com", "analystpass1",
+                      role=ROLE_ANALYST)
+    return app, app.test_client()
+
+
+def test_scan_endpoints_are_admin_only():
+    """Analysts and community managers must not be able to trigger scans or
+    read the run history — both are admin-only (server-load surface)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app, client = _app_with_analyst(tmp)
+
+        # Analyst is blocked from both scan trigger and run listing.
+        client.post("/login", data={"username": "analyst1",
+                                    "password": "analystpass1"})
+        assert client.post("/app/api/scan",
+                           json={"domains": ["x.example"]}).status_code == 403
+        assert client.get("/app/api/runs").status_code == 403
+
+        # Admin retains access.
+        client.get("/logout")
+        client.post("/login", data={"username": "admin",
+                                    "password": "changeme123"})
+        assert client.get("/app/api/runs").status_code == 200
+
+
+def test_help_endpoint_serves_control_topics():
+    """The help endpoint returns file-based topics keyed by control id."""
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["SEE_SECRET_KEY"] = "x" * 32
+        from app_factory import create_app
+        app = create_app({"db_path": os.path.join(tmp, "s.db"),
+                          "scanning": {"active_smtp": False}})
+        client = app.test_client()
+        client.post("/login", data={"username": "admin",
+                                    "password": "changeme123"})
+        r = client.get("/app/api/help")
+        assert r.status_code == 200
+        data = r.get_json()
+        assert "controls" in data
+        for control in ("spf", "dkim", "dmarc", "starttls", "bimi"):
+            assert control in data["controls"]
+            assert data["controls"][control].get("body")
+
+
+def test_help_content_file_is_valid_json():
+    """The shipped help content must parse and expose the expected shape."""
+    import json as _json
+    path = os.path.join(os.path.dirname(__file__), "..",
+                        "help", "help_content.json")
+    with open(path, encoding="utf-8") as fh:
+        data = _json.load(fh)
+    assert set(data["controls"]) >= {
+        "spf", "dkim", "dmarc", "starttls", "dnssec",
+        "dane", "mta_sts", "tlsrpt", "bimi"}
+
+
+def test_admin_shell_escapes_names_for_inline_handlers():
+    """Regression guard for the apostrophe bug: inline on* handlers must embed
+    names via jss() (JSON-encoded), never as a raw single-quoted literal that a
+    name like  Banca d'Italia  would break."""
+    from admin.routes import admin_bp  # noqa: F401  (ensures import works)
+    import admin.routes as ar
+    import inspect
+    src = inspect.getsource(ar)
+    assert "function jss(" in src
+    # The previously-broken patterns must be gone.
+    assert "openOrgDomains(${o.id},'${esc(o.name)}')" not in src
+    assert "deleteOrg(${o.id},'${esc(o.name)}')" not in src
+    # And the safe form must be present.
+    assert "openOrgDomains(${o.id},${jss(o.name)})" in src

@@ -1,0 +1,51 @@
+{
+  "_comment": "SEE-Monitor help content. Edit this file to change the in-app help shown behind the (?) icons on the Overview control list and on a domain's findings. The 'controls' keys must match the control ids used by the assessor (spf, dkim, dmarc, starttls, dnssec, dane, mta_sts, tlsrpt, bimi). 'body' is HTML and is rendered as-is: it is trusted because it can only be changed via a code deploy, so it must NOT be populated from user input. Keep it to <p>, <ul>/<li>, <code> and <a href target=\"_blank\" rel=\"noopener\">.",
+  "controls": {
+    "spf": {
+      "title": "SPF — Sender Policy Framework",
+      "body": "<p>SPF lists the hosts allowed to send mail for the domain via a <code>TXT</code> record (<code>v=spf1 …</code>). A strict record ending in <code>-all</code> (hard fail) lets receivers reject forgeries; <code>~all</code> (soft fail) is weaker. Keep DNS lookups within the RFC limit of 10.</p><ul><li><a href=\"https://doi.org/10.6028/NIST.SP.800-177r1\" target=\"_blank\" rel=\"noopener\">NIST SP 800-177r1 §4.1</a></li><li><a href=\"https://www.rfc-editor.org/rfc/rfc7208\" target=\"_blank\" rel=\"noopener\">RFC 7208 — SPF</a></li><li><a href=\"https://www.bsi.bund.de/dok/TR-03182\" target=\"_blank\" rel=\"noopener\">BSI TR-03182 (Email Authentication)</a></li></ul>"
+    },
+    "dkim": {
+      "title": "DKIM — DomainKeys Identified Mail",
+      "body": "<p>DKIM signs outbound mail with a private key; receivers verify it against a public key published at <code>&lt;selector&gt;._domainkey.&lt;domain&gt;</code>. Use ≥2048-bit RSA (or Ed25519). Because selectors cannot be enumerated from DNS, an <em>unconfirmed</em> DKIM result means no selector was discovered or registered — it does not prove DKIM is absent. Register known selectors on the domain page to confirm.</p><ul><li><a href=\"https://doi.org/10.6028/NIST.SP.800-177r1\" target=\"_blank\" rel=\"noopener\">NIST SP 800-177r1 §4.2</a></li><li><a href=\"https://www.rfc-editor.org/rfc/rfc6376\" target=\"_blank\" rel=\"noopener\">RFC 6376 — DKIM</a></li></ul>"
+    },
+    "dmarc": {
+      "title": "DMARC — alignment &amp; policy",
+      "body": "<p>DMARC ties SPF/DKIM results to the visible <code>From:</code> domain and tells receivers what to do on failure via <code>_dmarc.&lt;domain&gt;</code> (<code>p=none|quarantine|reject</code>). <code>p=reject</code> with aggregate reporting (<code>rua=</code>) is the strong target; <code>p=none</code> only monitors.</p><ul><li><a href=\"https://doi.org/10.6028/NIST.SP.800-177r1\" target=\"_blank\" rel=\"noopener\">NIST SP 800-177r1 §4.4</a></li><li><a href=\"https://www.rfc-editor.org/rfc/rfc7489\" target=\"_blank\" rel=\"noopener\">RFC 7489 — DMARC</a></li></ul>"
+    },
+    "starttls": {
+      "title": "STARTTLS — opportunistic transport encryption",
+      "body": "<p>STARTTLS upgrades an inbound SMTP session to TLS. Every MX host should offer it with a valid certificate and TLS 1.2+. An <em>unknown</em> result means the SMTP probe could not complete (connection refused, timeout, or filtering) — it is not scored as a failure but also cannot be confirmed as working; see the domain's confidence notes.</p><ul><li><a href=\"https://doi.org/10.6028/NIST.SP.800-177r1\" target=\"_blank\" rel=\"noopener\">NIST SP 800-177r1 §4.5</a></li><li><a href=\"https://www.rfc-editor.org/rfc/rfc3207\" target=\"_blank\" rel=\"noopener\">RFC 3207 — SMTP STARTTLS</a></li></ul>"
+    },
+    "dnssec": {
+      "title": "DNSSEC — signed DNS",
+      "body": "<p>DNSSEC signs DNS answers so resolvers can detect tampering, protecting the very records (MX, SPF, DKIM, TLSA) the other controls rely on. It requires a DS record in the parent zone and a validating resolver.</p><ul><li><a href=\"https://www.rfc-editor.org/rfc/rfc4033\" target=\"_blank\" rel=\"noopener\">RFC 4033-4035 — DNSSEC</a></li><li><a href=\"https://www.ccn-cert.cni.es/\" target=\"_blank\" rel=\"noopener\">CCN-CERT BP/02 (Correo electrónico)</a></li></ul>"
+    },
+    "dane": {
+      "title": "DANE — DNS-based Authentication of Named Entities",
+      "body": "<p>DANE publishes <code>TLSA</code> records (under DNSSEC) that pin the MX host's certificate, letting a sender require authenticated TLS instead of falling back to cleartext. Requires DNSSEC to be trustworthy.</p><ul><li><a href=\"https://www.rfc-editor.org/rfc/rfc7672\" target=\"_blank\" rel=\"noopener\">RFC 7672 — DANE for SMTP</a></li><li><a href=\"https://www.bsi.bund.de/dok/TR-03182\" target=\"_blank\" rel=\"noopener\">BSI TR-03182</a></li></ul>"
+    },
+    "mta_sts": {
+      "title": "MTA-STS — SMTP MTA Strict Transport Security",
+      "body": "<p>MTA-STS lets a domain publish a policy (via <code>_mta-sts</code> TXT + an HTTPS-hosted policy file) requiring senders to use validated TLS. <code>mode=enforce</code> is the strong target; <code>testing</code> only reports. A DNSSEC-free alternative to DANE.</p><ul><li><a href=\"https://www.rfc-editor.org/rfc/rfc8461\" target=\"_blank\" rel=\"noopener\">RFC 8461 — MTA-STS</a></li></ul>"
+    },
+    "tlsrpt": {
+      "title": "TLS-RPT — SMTP TLS Reporting",
+      "body": "<p>TLS-RPT (<code>_smtp._tls</code> TXT with <code>rua=</code>) asks sending providers to report TLS negotiation failures, giving visibility into broken STARTTLS/MTA-STS/DANE before mail is lost. Complements, and is usually deployed with, MTA-STS.</p><ul><li><a href=\"https://www.rfc-editor.org/rfc/rfc8460\" target=\"_blank\" rel=\"noopener\">RFC 8460 — SMTP TLS Reporting</a></li></ul>"
+    },
+    "bimi": {
+      "title": "BIMI — Brand Indicators for Message Identification",
+      "body": "<p>BIMI is optional and bonus-only: it displays a brand logo in supporting clients once DMARC is at enforcement. Not publishing it is never a failure, so an absent BIMI record shows as not-implemented in the rate but does not lower a domain's score.</p><ul><li><a href=\"https://datatracker.ietf.org/doc/draft-brand-indicators-for-message-identification/\" target=\"_blank\" rel=\"noopener\">BIMI (IETF draft)</a></li></ul>"
+    }
+  },
+  "general": {
+    "control_rate": {
+      "title": "Control implementation rate",
+      "body": "<p>For each control this shows <code>implemented / applicable</code> across your mail-receiving domains. The denominator is every mail domain the control applies to; a domain counts as <em>not implemented</em> when the control is missing, disabled, or could not be confirmed (e.g. no DKIM selector found, or a failed STARTTLS probe). Domains with no mail service (null/absent MX) are excluded from transport controls entirely.</p>"
+    },
+    "confidence": {
+      "title": "Why a control shows “—” (not scored)",
+      "body": "<p>A dash means the control could not be scored for this domain. This is not the same as a failure. Common reasons: the SMTP probe could not connect (STARTTLS unknown), no DKIM selector was discovered or registered, or the control is optional and simply absent (BIMI). The domain's confidence notes list the specific reason for each.</p>"
+    }
+  }
+}

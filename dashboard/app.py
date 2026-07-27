@@ -123,6 +123,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     font-size:.78rem}
   .periodsel button.active{background:var(--accent);color:#fff;
     border-color:var(--accent)}
+  .help{display:inline-flex;align-items:center;justify-content:center;
+    width:15px;height:15px;border-radius:50%;border:1px solid var(--border);
+    color:var(--muted);font-size:.65rem;font-weight:700;cursor:pointer;
+    margin-left:.35rem;line-height:1;flex:none}
+  .help:hover{color:var(--accent);border-color:var(--accent)}
+  #hpop{position:fixed;z-index:1000;max-width:360px;background:var(--panel);
+    border:1px solid var(--border);border-radius:8px;padding:.9rem 1rem;
+    box-shadow:0 8px 30px rgba(0,0,0,.45);font-size:.82rem;line-height:1.45;
+    display:none}
+  #hpop h4{margin:0 0 .4rem;font-size:.85rem;color:var(--text)}
+  #hpop p{margin:.3rem 0}
+  #hpop ul{margin:.3rem 0 .1rem;padding-left:1.1rem}
+  #hpop a{color:var(--accent)}
+  #hpop .hx{position:absolute;top:.4rem;right:.55rem;cursor:pointer;
+    color:var(--muted);font-size:1rem;line-height:1}
+  .cnote{font-size:.75rem;color:var(--r-med);margin:.15rem 0 .3rem 90px}
 </style>
 </head>
 <body>
@@ -141,11 +157,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button data-view="groups">Group reports</button>
   <button data-view="trends">Trends</button>
   <button data-view="roadmap">Roadmap</button>
-  <button data-view="runs">Scans</button>
+  {% if role == 'admin' %}<button data-view="runs">Scans</button>{% endif %}
   <span class="gsel">Standard:
     <select id="gsel" onchange="setGuideline(this.value)"></select></span>
 </nav>
 <main id="main"><div class="empty">Loading…</div></main>
+<div id="hpop"><span class="hx" onclick="hideHelp()">×</span>
+  <h4 id="hpop-t"></h4><div id="hpop-b"></div></div>
 
 <script>
 const ROLE = "{{ role }}";
@@ -162,6 +180,47 @@ const RATING_COLOR = {not_implemented:"#d64545",medium:"#e0a030",
 const $ = s => document.querySelector(s);
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,
   c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const IS_ADMIN = ROLE === "admin";
+
+// ---- Help system ----------------------------------------------------
+// Content comes from a server-side JSON file (help/help_content.json); it is
+// trusted-by-provenance (deploy-only), so its HTML is rendered as-is.
+let HELP = {controls:{}, general:{}};
+async function initHelp(){
+  try{ HELP = await fetch("/app/api/help").then(r=>r.json()); }
+  catch(e){ HELP = {controls:{}, general:{}}; }
+}
+function helpTopic(kind, key){
+  return ((HELP||{})[kind]||{})[key] || null;
+}
+// A (?) icon that opens the topic; renders nothing if the topic is absent.
+function helpIcon(kind, key){
+  if(!helpTopic(kind, key)) return "";
+  return `<span class="help" onclick="showHelp(event,'${kind}','${esc(key)}')"
+    title="Help">?</span>`;
+}
+function showHelp(ev, kind, key){
+  ev.stopPropagation();
+  const t = helpTopic(kind, key);
+  if(!t) return;
+  $("#hpop-t").textContent = t.title || key;
+  $("#hpop-b").innerHTML = t.body || "";     // trusted deploy-time content
+  const pop = $("#hpop");
+  pop.style.display = "block";
+  const r = ev.currentTarget.getBoundingClientRect();
+  let top = r.bottom + 6, left = r.left;
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+  if(left + pw > innerWidth - 10) left = innerWidth - pw - 10;
+  if(top + ph > innerHeight - 10) top = Math.max(10, r.top - ph - 6);
+  pop.style.top = top + "px";
+  pop.style.left = Math.max(10, left) + "px";
+}
+function hideHelp(){ const p=$("#hpop"); if(p) p.style.display="none"; }
+document.addEventListener("click", e=>{
+  const p = $("#hpop");
+  if(p && p.style.display==="block" && !p.contains(e.target)
+     && !e.target.classList.contains("help")) hideHelp();
+});
 
 // ---- Conformance profile (guideline) state --------------------------
 let GUIDELINE = "nist_800_177r1";
@@ -260,6 +319,37 @@ function ctrlBar(label,v){
     <span class="bar"><span style="width:${w}%;background:${scoreColor(v)}"></span></span>
     <span class="val">${val}</span></div>`;
 }
+// Explain why a control scored "—" (None) so a domain view distinguishes
+// "probe failed / not found" from "genuinely not applicable". Derived from the
+// stored scan checks (no schema change needed).
+function noneReason(control, checks, noMail){
+  if(noMail && ["starttls","dane","mta_sts","tlsrpt"].includes(control))
+    return "n/a — domain receives no mail (no/null MX)";
+  const c = (checks||{})[control]||{};
+  if(control==="dkim")
+    return "not confirmed — no DKIM selector discovered or registered";
+  if(control==="starttls")
+    return c.applicable===false ? "n/a — no MX to probe"
+      : "not confirmed — STARTTLS could not be probed (connection failed or timed out)";
+  if(control==="bimi")
+    return "optional — no BIMI record published (does not affect the score)";
+  if(control==="dane" && c.applicable===false)  return "n/a — no MX to probe";
+  if(control==="tlsrpt")                        return "not published";
+  if(control==="mta_sts")                       return "not published";
+  return "not determined";
+}
+// Domain-view control row: adds the per-control help icon and, when the
+// control is unscored, an inline reason line.
+function ctrlBarD(control, v, checks, noMail){
+  const label = (CTRL_LABEL[control]||control) + helpIcon('controls', control);
+  const val = v==null?"—":Math.round(v);
+  const w = v==null?0:v;
+  const reason = v==null
+    ? `<div class="cnote">${esc(noneReason(control, checks, noMail))}</div>` : "";
+  return `<div class="ctrlrow"><span class="lbl">${label}</span>
+    <span class="bar"><span style="width:${w}%;background:${scoreColor(v)}"></span></span>
+    <span class="val">${val}</span></div>${reason}`;
+}
 
 // ---- Views ----------------------------------------------------------
 const views = {};
@@ -286,7 +376,8 @@ views.overview = async () => {
   for(const c of CONTROLS){
     const ci = (s.controls||{})[c]||{implemented:0,applicable:0};
     const pct = ci.applicable? Math.round(100*ci.implemented/ci.applicable):null;
-    ctrls += `<div class="ctrlrow"><span class="lbl">${CTRL_LABEL[c]}</span>
+    ctrls += `<div class="ctrlrow"><span class="lbl">${CTRL_LABEL[c]}${
+        helpIcon('controls', c)}</span>
       <span class="bar"><span style="width:${pct||0}%;background:var(--accent)"></span></span>
       <span class="val">${pct==null?"—":pct+"%"}</span></div>
       <div class="muted" style="font-size:.7rem;margin:-.15rem 0 .3rem 90px">
@@ -304,7 +395,8 @@ views.overview = async () => {
       <div class="muted" style="font-size:.72rem;margin-top:.6rem">
         Click a status to list those domains.</div>
     </div>
-    <div class="panel" style="margin-top:1rem"><h3>Control implementation rate</h3>
+    <div class="panel" style="margin-top:1rem"><h3>Control implementation rate${
+        helpIcon('general','control_rate')}</h3>
       ${total?ctrls:'<div class="empty">No assessments yet</div>'}</div>`;
 };
 
@@ -350,17 +442,32 @@ views.domain = async (domain) => {
       ${a?ratingPill(a.rating):''}
       ${a?`<span style="color:${scoreColor(a.score)};font-weight:700;font-size:1.2rem">${a.score}</span>`:''}
       <span class="spacer" style="margin-left:auto"></span>
-      <button class="btn ghost" onclick="rescan('${esc(domain)}')">Re-scan</button>
+      ${IS_ADMIN?`<button class="btn ghost" onclick="rescan('${esc(domain)}')">Re-scan</button>`:''}
       <button class="btn ghost" onclick="go('trends','domain=${encodeURIComponent(domain)}','domain: ${esc(domain)}')">Trends</button>
       ${exportButtons('domain='+encodeURIComponent(domain))}
       <button class="btn" onclick="go('roadmap','${esc(domain)}')">Roadmap</button>
     </div>`;
   if(!a){ return head + `<div class="empty">No assessment yet.</div></div>`; }
 
-  let bars = CONTROLS.map(c=>ctrlBar(CTRL_LABEL[c], a.control_scores[c])).join("");
+  const noMail = !!a.no_mail;
+  let bars = CONTROLS.map(c=>ctrlBarD(c, a.control_scores[c], checks, noMail)).join("");
   let findings = (a.findings||[]).map(f=>`<li class="sev-${f.severity}">
     <b>${CTRL_LABEL[f.control]||f.control}:</b> ${esc(f.message)}</li>`).join("")
     || '<li class="muted">No issues.</li>';
+  // Evidence-quality notes explain unconfirmed controls (probe failures,
+  // undiscovered DKIM selectors, etc.) — surfaced so a viewer understands why
+  // some controls are unscored rather than treating "—" as a pass or fail.
+  const notes = a.confidence_notes||[];
+  let confBlock = "";
+  if((a.confidence && a.confidence!=="high") || notes.length){
+    const items = notes.map(n=>`<li>${esc(n)}</li>`).join("")
+      || '<li class="muted">No caveats recorded.</li>';
+    confBlock = `<div class="panel" style="margin-top:1rem">
+      <h3>Evidence &amp; confidence${helpIcon('general','confidence')}</h3>
+      <div class="muted" style="font-size:.8rem;margin-bottom:.3rem">
+        Overall confidence: <b>${esc(a.confidence||'high')}</b></div>
+      <ul>${items}</ul></div>`;
+  }
 
   // technical drill-down
   let tech = "";
@@ -403,6 +510,7 @@ views.domain = async (domain) => {
     </div>
     <div class="panel" style="margin-top:1rem"><h3>Findings</h3>
       <ul>${findings}</ul></div>
+    ${confBlock}
     <div class="grid cards" style="margin-top:1rem">${tech}</div>`;
 };
 
@@ -750,6 +858,8 @@ window.groupRoadmap = async (kind, key)=>{
 };
 
 views.runs = async () => {
+  if(!IS_ADMIN) return `<div class="panel"><div class="empty">
+    Scanning is restricted to administrators.</div></div>`;
   const runs = await api("/runs");
   let rows = runs.map(r=>`<tr><td><code>${esc(r.id)}</code></td>
     <td>${esc((r.started_at||'').slice(0,19).replace('T',' '))}</td>
@@ -815,7 +925,7 @@ async function initGuidelines(){
       || `<option>${esc(GUIDELINE)}</option>`;
   }
 }
-(async ()=>{ await initGuidelines(); render(); })();
+(async ()=>{ await Promise.all([initGuidelines(), initHelp()]); render(); })();
 </script>
 </body>
 </html>

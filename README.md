@@ -328,11 +328,17 @@ reports/              CSV / JSON exporters
 auth/ admin/          Reused RBAC, login, and admin console
 scheduler/            APScheduler periodic scans
 guidelines/           scoring profiles: nist_800_177r1 (default) + bsi_tr03182, acn_email, ccn_cert_bp02
+help/help_content.json  editable in-app help (per-control + general topics); file-based, never DB-stored
 ```
 
-Roles: **admin** (everything), **community_manager** (their communities'
-organisations), **analyst** (their assigned domains). Country/region tagging on
+Roles: **admin** (everything, including triggering scans and viewing run
+history), **community_manager** (their communities' organisations),
+**analyst** (their assigned domains). Country/region tagging on
 organisations is carried over from PQC-Monitor and drives the group reports.
+**Scanning is admin-only** — a scan spawns live DNS/SMTP/TLS probing, so
+`POST /app/api/scan` and the run history require the admin role; analysts and
+community managers view results and manage their own DKIM selectors but cannot
+launch scans.
 
 ---
 

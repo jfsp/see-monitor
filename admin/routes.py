@@ -560,6 +560,9 @@ body { background:var(--bg); color:var(--text);
 .tbl th { text-align:left; padding:.5rem .75rem; color:var(--muted);
           font-size:.7rem; text-transform:uppercase; letter-spacing:.05em;
           border-bottom:1px solid var(--border); font-weight:500; }
+.tbl th.sortable { cursor:pointer; user-select:none; }
+.tbl th.sortable:hover { color:var(--accent); }
+.tbl th .sort-ind { font-size:.7rem; opacity:.7; margin-left:.2rem; }
 .tbl td { padding:.6rem .75rem; border-bottom:1px solid rgba(30,45,74,.5); }
 .tbl tr:last-child td { border-bottom:none; }
 .tbl tr:hover td { background:rgba(0,212,255,.03); }
@@ -675,8 +678,13 @@ select option { background:var(--panel); }
         <div class="card-body" style="padding:0">
           <table class="tbl">
             <thead><tr>
-              <th>Username</th><th>Full Name</th><th>Email</th>
-              <th>Role</th><th>Status</th><th>Last Login</th><th>Actions</th>
+              <th class="sortable" onclick="sortBy('users','username')">Username<span class="sort-ind" data-tbl="users" data-k="username"></span></th>
+              <th class="sortable" onclick="sortBy('users','full_name')">Full Name<span class="sort-ind" data-tbl="users" data-k="full_name"></span></th>
+              <th class="sortable" onclick="sortBy('users','email')">Email<span class="sort-ind" data-tbl="users" data-k="email"></span></th>
+              <th class="sortable" onclick="sortBy('users','role')">Role<span class="sort-ind" data-tbl="users" data-k="role"></span></th>
+              <th class="sortable" onclick="sortBy('users','is_active')">Status<span class="sort-ind" data-tbl="users" data-k="is_active"></span></th>
+              <th class="sortable" onclick="sortBy('users','last_login')">Last Login<span class="sort-ind" data-tbl="users" data-k="last_login"></span></th>
+              <th>Actions</th>
             </tr></thead>
             <tbody id="users-tbody">
               <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem">Loading…</td></tr>
@@ -722,7 +730,7 @@ select option { background:var(--panel); }
       <div class="card">
         <div class="card-body" style="padding:0">
           <table class="tbl" id="tbl-orgs">
-            <thead><tr><th>#</th><th>Name</th><th>Sector</th><th>Region</th><th>Country</th><th>Domains</th><th>Actions</th></tr></thead>
+            <thead><tr><th class="sortable" onclick="sortBy('orgs','id')">#<span class="sort-ind" data-tbl="orgs" data-k="id"></span></th><th class="sortable" onclick="sortBy('orgs','name')">Name<span class="sort-ind" data-tbl="orgs" data-k="name"></span></th><th class="sortable" onclick="sortBy('orgs','sector')">Sector<span class="sort-ind" data-tbl="orgs" data-k="sector"></span></th><th class="sortable" onclick="sortBy('orgs','region')">Region<span class="sort-ind" data-tbl="orgs" data-k="region"></span></th><th class="sortable" onclick="sortBy('orgs','country_code')">Country<span class="sort-ind" data-tbl="orgs" data-k="country_code"></span></th><th class="sortable" onclick="sortBy('orgs','domain_count')">Domains<span class="sort-ind" data-tbl="orgs" data-k="domain_count"></span></th><th>Actions</th></tr></thead>
             <tbody id="tbody-orgs"></tbody>
           </table>
         </div>
@@ -761,8 +769,11 @@ select option { background:var(--panel); }
       <div id="communities-alert" class="alert"></div>
       <table class="tbl" id="communities-table">
         <thead><tr>
-          <th>#</th><th>Name</th><th>Description</th>
-          <th style="text-align:center">Orgs</th><th>Actions</th>
+          <th class="sortable" onclick="sortBy('communities','id')">#<span class="sort-ind" data-tbl="communities" data-k="id"></span></th>
+          <th class="sortable" onclick="sortBy('communities','name')">Name<span class="sort-ind" data-tbl="communities" data-k="name"></span></th>
+          <th class="sortable" onclick="sortBy('communities','description')">Description<span class="sort-ind" data-tbl="communities" data-k="description"></span></th>
+          <th class="sortable" style="text-align:center" onclick="sortBy('communities','org_count')">Orgs<span class="sort-ind" data-tbl="communities" data-k="org_count"></span></th>
+          <th>Actions</th>
         </tr></thead>
         <tbody id="communities-tbody"></tbody>
       </table>
@@ -945,8 +956,15 @@ function showView(name) {
 // ── Users ─────────────────────────────────────────────────────────────────────
 async function loadUsers() {
   const r = await fetch('/admin/api/users');
-  const users = await r.json();
+  _tableData.users = await r.json();
+  _tableRender.users = renderUsers;
+  _updateSortIndicators('users');
+  renderUsers();
+}
+function renderUsers() {
   const tbody = document.getElementById('users-tbody');
+  if (!tbody) return;
+  const users = _sorted('users');
   if (!users.length) {
     tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted)">No users yet.</td></tr>';
     return;
@@ -960,8 +978,8 @@ async function loadUsers() {
     <td style="color:var(--muted);font-size:.75rem">${(u.last_login||'Never').slice(0,16)}</td>
     <td>
       <button class="btn btn-outline btn-sm" onclick="openEditUser(${u.id})">Edit</button>
-      <button class="btn btn-ghost btn-sm" onclick="openResetPw(${u.id},'${u.username}')">Password</button>
-      <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${u.username}')">Delete</button>
+      <button class="btn btn-ghost btn-sm" onclick="openResetPw(${u.id},${jss(u.username)})">Password</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},${jss(u.username)})">Delete</button>
     </td>
   </tr>`).join('');
 }
@@ -1206,7 +1224,7 @@ async function loadDomainLists() {
     <td style="text-align:center"><span style="color:var(--accent)">${dl.user_count||0}</span></td>
     <td>
       <button class="btn btn-outline btn-sm" onclick="openEditList(${dl.id})">Edit</button>
-      <button class="btn btn-danger btn-sm"  onclick="deleteList(${dl.id},'${esc(dl.name)}')">Delete</button>
+      <button class="btn btn-danger btn-sm"  onclick="deleteList(${dl.id},${jss(dl.name)})">Delete</button>
     </td>
   </tr>`).join('');
 }
@@ -1386,6 +1404,62 @@ async function deleteList(listId, name) {
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+// Safe JS-string literal for embedding a value inside an inline on* handler.
+// HTML-escaping alone is NOT enough: the browser decodes entities (e.g. &#39;)
+// before the JS parser runs, so a name like  Banca d'Italia  turns
+//   onclick="f('Banca d&#39;Italia')"  into  f('Banca d'Italia')  -> syntax
+// error. JSON.stringify produces a correctly-quoted/escaped literal; wrapping
+// that in esc() then keeps the surrounding HTML attribute well-formed. Use it
+// WITHOUT extra surrounding quotes:  onclick="f(${jss(name)})".
+function jss(s) {
+  return esc(JSON.stringify(s == null ? '' : String(s)));
+}
+
+// ── Sortable admin tables ─────────────────────────────────────────────────────
+// Client-side only: these tables are small, so we sort the already-fetched
+// array and re-render the tbody rather than round-tripping to the server.
+const _tableData   = { users: [], orgs: [], communities: [] };
+const _tableRender = {};   // table -> render fn (registered by each load*())
+const _tableSort   = {
+  users:       { key: 'username', dir: 1 },
+  orgs:        { key: 'id',       dir: 1 },
+  communities: { key: 'id',       dir: 1 },
+};
+
+function _cmp(a, b) {
+  // Empty/undefined values sort last; booleans as 0/1; numbers numerically;
+  // strings case-insensitively with natural number ordering.
+  const na = (a === null || a === undefined || a === '');
+  const nb = (b === null || b === undefined || b === '');
+  if (na && nb) return 0;
+  if (na) return 1;
+  if (nb) return -1;
+  if (typeof a === 'boolean') a = a ? 1 : 0;
+  if (typeof b === 'boolean') b = b ? 1 : 0;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).toLowerCase().localeCompare(
+    String(b).toLowerCase(), undefined, { numeric: true });
+}
+
+function _sorted(table) {
+  const st = _tableSort[table];
+  return (_tableData[table] || []).slice()
+    .sort((x, y) => st.dir * _cmp(x[st.key], y[st.key]));
+}
+
+function sortBy(table, key) {
+  const st = _tableSort[table];
+  if (st.key === key) st.dir = -st.dir; else { st.key = key; st.dir = 1; }
+  _updateSortIndicators(table);
+  if (_tableRender[table]) _tableRender[table]();
+}
+
+function _updateSortIndicators(table) {
+  const st = _tableSort[table];
+  document.querySelectorAll('.sort-ind[data-tbl="' + table + '"]').forEach(el => {
+    el.textContent = (el.dataset.k === st.key) ? (st.dir > 0 ? '\u25B2' : '\u25BC') : '';
+  });
+}
 
 // ── Audit Log ─────────────────────────────────────────────────────────────────
 async function loadAudit() {
@@ -1429,9 +1503,15 @@ let _editOrgId = null;
 
 async function loadOrgs() {
   const r = await fetch('/admin/api/organisations');
-  const orgs = await r.json();
+  _tableData.orgs = await r.json();
+  _tableRender.orgs = renderOrgs;
+  _updateSortIndicators('orgs');
+  renderOrgs();
+}
+function renderOrgs() {
   const tbody = document.getElementById('tbody-orgs');
   if (!tbody) return;
+  const orgs = _sorted('orgs');
   tbody.innerHTML = orgs.map(o => `<tr>
     <td style="color:var(--muted);font-size:.78rem">#${o.id}</td>
     <td><strong>${esc(o.name)}</strong></td>
@@ -1441,8 +1521,8 @@ async function loadOrgs() {
     <td><span style="background:rgba(0,212,255,.1);color:var(--accent);padding:.1rem .45rem;border-radius:3px;font-size:.75rem">${o.domain_count||0} domains</span></td>
     <td>
       <button class="btn btn-outline btn-sm" onclick="openEditOrg(${o.id})">Edit</button>
-      <button class="btn btn-outline btn-sm" onclick="openOrgDomains(${o.id},'${esc(o.name)}')">Domains</button>
-      <button class="btn btn-danger btn-sm" onclick="deleteOrg(${o.id},'${esc(o.name)}')">Delete</button>
+      <button class="btn btn-outline btn-sm" onclick="openOrgDomains(${o.id},${jss(o.name)})">Domains</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteOrg(${o.id},${jss(o.name)})">Delete</button>
     </td>
   </tr>`).join('') || '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:1.5rem">No organisations yet.</td></tr>';
 }
@@ -1514,9 +1594,15 @@ let _editCommunityId = null;
 
 async function loadCommunities() {
   const r = await fetch('/admin/api/communities');
-  const communities = await r.json();
+  _tableData.communities = await r.json();
+  _tableRender.communities = renderCommunities;
+  _updateSortIndicators('communities');
+  renderCommunities();
+}
+function renderCommunities() {
   const tbody = document.getElementById('communities-tbody');
   if (!tbody) return;
+  const communities = _sorted('communities');
   tbody.innerHTML = communities.map(c => `
     <tr>
       <td style="color:var(--muted)">#${c.id}</td>
@@ -1530,7 +1616,7 @@ async function loadCommunities() {
       <td>
         <button class="btn btn-sm btn-ghost" onclick="openEditCommunity(${c.id})">Edit</button>
         <button class="btn btn-sm btn-ghost" style="color:#ef4444"
-                onclick="deleteCommunity(${c.id}, '${esc(c.name)}')">Delete</button>
+                onclick="deleteCommunity(${c.id}, ${jss(c.name)})">Delete</button>
       </td>
     </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:2rem">No communities yet.</td></tr>';
 }

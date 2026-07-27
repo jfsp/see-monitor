@@ -4,7 +4,78 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
-## [0.6.4] — 2026-07-24
+## [0.6.5] — 2026-07-27
+
+Bug-fix and hardening release: corrects the Overview control-implementation
+denominators, locks scanning to admins, makes the admin tables sortable, fixes
+organisations whose name contains an apostrophe, and adds file-based in-app
+help.
+
+### Fixed
+- **Control implementation rate denominators.** `get_summary_stats` only counted
+  a mail domain toward a control's `applicable` total when that control had a
+  numeric score, so any control that came back `None` (unknown or not published)
+  silently shrank its own denominator. DKIM read `17/17` (100%) instead of
+  `17/32`, STARTTLS `24/24` instead of `24/32`, and BIMI `0/0` instead of
+  `0/32`. A mail domain is now applicable for every control it carries; an
+  unconfirmed or absent control counts as *not implemented* rather than dropping
+  out. The rate now reads "of all my mail domains, how many have this control
+  working". Fix is in the shared summary function, so the Overview, per-org and
+  group-report views all correct together.
+- **Why a control is unscored is now visible.** Because unconfirmed controls now
+  count against the rate, the domain view explains each `—`: an inline reason
+  ("STARTTLS could not be probed", "no DKIM selector discovered", "optional — no
+  BIMI record", "n/a — no mail") plus a new **Evidence & confidence** panel that
+  surfaces the already-stored confidence notes. Display-only; no schema change.
+- **Organisations with an apostrophe in the name.** Actions on orgs such as
+  *Banca d'Italia* (Domains, Delete — and the equivalent user/list/community
+  buttons) silently did nothing. The names were HTML-escaped into inline
+  `onclick` handlers, but the browser decodes `&#39;` back to `'` before the JS
+  parser runs, so `openOrgDomains(5,'Banca d'Italia')` was a syntax error.
+  A new `jss()` helper embeds values as JSON-encoded literals, which survive
+  HTML decoding and also handle embedded double quotes. Backend SQL was already
+  parameterised and unaffected.
+
+### Changed
+- **Scanning is admin-only.** `POST /app/api/scan` and `GET /app/api/runs` now
+  require the admin role (previously any authenticated user scoped to their
+  domains). Each scan spawns a live probing thread (DNS/SMTP/TLS) and writes
+  results, so it is both a server-load and a data-integrity surface. The *Scans*
+  nav tab and the domain *Re-scan* button are hidden for non-admins, and the
+  runs view refuses to render for them. Analysts and community managers continue
+  to **view** results and, for their own assigned domains, to register/remove
+  DKIM selectors.
+- **Sortable admin tables.** Users (username, name, email, role, status, last
+  login), Organisations (id, name, sector, region, country, domains) and
+  Communities (id, name, description, orgs) now sort on any column header, with
+  a direction indicator. Client-side only.
+
+### Added
+- **In-app help.** A new `(?)` popover appears per control on the Overview
+  implementation-rate list and on a domain's controls/findings, plus general
+  topics for the rate itself and for unscored controls. Content is served from
+  `help/help_content.json` (new `GET /app/api/help`) and is edited in that file
+  alongside the code — deliberately **not** stored in the database, so no
+  user-writable path can inject the HTML it renders. Seeded with a short
+  description and authoritative links (NIST SP 800-177r1, BSI TR-03182,
+  CCN-CERT BP/02, relevant RFCs) for every control.
+
+### Security / least-privilege audit
+- Reviewed every non-admin state-changing or resource-consuming endpoint. The
+  scan trigger was the significant server-load vector (unbounded thread spawn +
+  outbound probing) and is now admin-only. DKIM selector add/delete remain
+  available to analysts, deliberately scoped to their assigned domains. PDF and
+  roadmap generation remain available (bounded compute).
+
+### Tests
+- 24 → **97 passing** (5 new): control-rate denominator counts unconfirmed
+  controls as applicable; `/app/api/scan` and `/app/api/runs` return 403 for
+  analysts and 200 for admins; the help endpoint and shipped JSON expose all
+  nine control topics; and a regression guard asserts inline handlers embed
+  names via `jss()`.
+
+
+
 
 Bug-fix release. Running `scripts/reassess_all.py` duplicated every domain in
 the dashboards, once per run.
