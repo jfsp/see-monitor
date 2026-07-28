@@ -2085,7 +2085,7 @@ def test_check_apis_all_unconfigured_exit_zero(tmp_path):
     cfg = tmp_path / "c.yaml"
     cfg.write_text(
         "shodan: {api_key: ''}\n"
-        "censys: {api_id: '', api_secret: ''}\n"
+        "censys: {personal_access_token: ''}\n"
         "dnsdumpster: {api_key: ''}\n"
         "securitytrails: {api_key: ''}\n"
         "crtsh: {enabled: false}\n")
@@ -2106,25 +2106,33 @@ class _FakeResp:
             raise RuntimeError(f"{self.status_code} error")
 
 
-def test_check_apis_censys_v1_account_and_migration_hint():
-    """Censys check uses the v1 account path and, on auth failure, explains the
-    Legacy-Search -> Platform migration rather than a bare error."""
+def test_check_apis_censys_platform_pat_and_credits():
+    """Censys check uses the quota-free Platform credit-balance endpoint, reports
+    the balance on success, and gives clear PAT/org guidance on 401/404."""
     m = _load_check_apis()
-    account_url = m.CENSYS_API.rsplit("/api/", 1)[0] + "/api/v1/account"
-    assert account_url == "https://search.censys.io/api/v1/account"
+    # Platform base + quota-free credits path.
+    assert m.CENSYS_API == "https://api.platform.censys.io/v3"
+    assert m.CENSYS_CREDITS == "/accounts/users/credits"
 
     orig = m.requests.get
     try:
+        cfg = {"censys": {"personal_access_token": "tok"}}
         m.requests.get = lambda u, **k: _FakeResp(401)
-        r = m.check_censys({"censys": {"api_id": "x", "api_secret": "y"}},
-                           5, "google.com")
-        assert r["status"] == m.FAIL and "Platform" in r["detail"]
+        r = m.check_censys(cfg, 5, "google.com")
+        assert r["status"] == m.FAIL and "401" in r["detail"]
+
+        m.requests.get = lambda u, **k: _FakeResp(404)
+        r = m.check_censys(cfg, 5, "google.com")
+        assert r["status"] == m.FAIL and "organization_id" in r["detail"]
 
         m.requests.get = lambda u, **k: _FakeResp(
-            200, js={"login": "me", "quota": {"used": 8, "allowance": 250}})
-        r = m.check_censys({"censys": {"api_id": "x", "api_secret": "y"}},
-                           5, "google.com")
-        assert r["status"] == m.OK and "8/250" in r["detail"]
+            200, js={"result": {"balance": 100, "resets_at": "2026-08-01"}})
+        r = m.check_censys(cfg, 5, "google.com")
+        assert r["status"] == m.OK and "balance=100" in r["detail"]
+
+        # No token -> skipped without any network call.
+        r = m.check_censys({"censys": {}}, 5, "google.com")
+        assert r["status"] == m.SKIP
     finally:
         m.requests.get = orig
 
@@ -2147,3 +2155,47 @@ def test_check_apis_dnsdumpster_domain_rejection_is_not_failure():
         assert r["status"] == m.FAIL and "401" in r["detail"]
     finally:
         m.requests.get = orig
+
+
+def test_censys_client_platform_host_parsing():
+    """The migrated CensysClient parses the Platform response
+    (result.resource.services[]) and infers STARTTLS from the tls object."""
+    import scanner.censys_client as cc
+
+    client = cc.CensysClient("tok", organization_id="org-1")
+    assert client.available
+    # Bearer auth + optional org param are wired correctly.
+    assert client._headers("x")["Authorization"] == "Bearer tok"
+    assert client._params() == {"organization_id": "org-1"}
+
+    payload = {"result": {"resource": {"ip": "1.2.3.4", "services": [
+        {"port": 25, "service_name": "SMTP",
+         "extended_service_name": "SMTP",
+         "tls": {"version_selected": "TLSv1.3"}},
+        {"port": 465, "service_name": "SMTPS",
+         "extended_service_name": "SMTPS",
+         "tls": {"version_selected": "TLSv1.2"}},
+        {"port": 80, "service_name": "HTTP"},
+    ]}}}
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return payload
+        def raise_for_status(self):
+            pass
+
+    orig_get, orig_dns = cc.requests.get, cc.socket.gethostbyname
+    try:
+        cc.socket.gethostbyname = lambda h: "1.2.3.4"
+        cc.requests.get = lambda *a, **k: _Resp()
+        out = client.host_smtp_info("mx.example.com")
+    finally:
+        cc.requests.get, cc.socket.gethostbyname = orig_get, orig_dns
+
+    assert out["found"] and out["ip"] == "1.2.3.4"
+    # STARTTLS inferred on 25 (explicit TLS object); 465 stays None (implicit).
+    assert out["ports"][25]["starttls"] is True
+    assert out["ports"][25]["tls_version"] == "TLSv1.3"
+    assert out["ports"][465]["starttls"] is None
+    assert 80 not in out["ports"]      # non-SMTP port ignored

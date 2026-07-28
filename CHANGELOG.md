@@ -4,6 +4,39 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.6.10] — 2026-07-28
+
+### Changed (action required for Censys users)
+- **Censys migrated to the Platform API.** The scanner client
+  (`scanner/censys_client.py`) and the connectivity checker now use the Censys
+  **Platform** API (`https://api.platform.censys.io/v3`) with a Personal Access
+  Token (Bearer), instead of the deprecated Legacy Search API
+  (`search.censys.io`, API id/secret, HTTP Basic auth — sunset by Censys in
+  September 2026). Host lookups use `GET /v3/global/asset/host/{ip}` and parse
+  the `result.resource.services[]` shape; STARTTLS is inferred from each SMTP
+  service's `tls` object (port 465 left as implicit TLS, matching the Shodan
+  client). **Update `config.yaml`:** replace the `censys.api_id` /
+  `censys.api_secret` fields with:
+  ```yaml
+  censys:
+    personal_access_token: "<your PAT>"
+    organization_id: ""      # optional; set if your token is org-scoped
+  ```
+  A PAT is created at https://accounts.censys.io/settings/personal-access-tokens .
+  `organization_id` is optional (free-tier host lookups work without it).
+
+### Fixed
+- **`check_apis.py` Censys check now works and is quota-free.** It validates the
+  PAT against `GET /v3/accounts/users/credits` (the Platform Free-user
+  credit-balance endpoint, which does not consume credits) and reports the
+  balance. On `401` it flags an invalid/inactive token; on `404` it suggests
+  setting `organization_id`. This replaces the previous check, which queried a
+  non-existent legacy endpoint and returned a confusing 404/403.
+- **`check_apis.py` crt.sh check retries transient 5xx.** crt.sh frequently
+  returns 502/503/504; the check now retries up to three times before reporting
+  a failure (with a note that it usually recovers), so a transient blip no
+  longer reads as an outage.
+
 ## [0.6.9] — 2026-07-28
 
 ### Fixed

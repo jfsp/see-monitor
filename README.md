@@ -494,8 +494,10 @@ this release (no schema column is provisioned for it yet).
   PDFs (reportlab). HTML export remains optional/not wired.
 - **Admin UI for DKIM selectors and scheduled scans** — the backend endpoints
   and scheduler exist; management screens are minimal.
-- **Censys parsing coverage** — `scanner/censys_client.py` maps the common
-  Search API v2 shapes; verify against your Censys plan's response format.
+- **Censys parsing coverage** — `scanner/censys_client.py` uses the Censys
+  Platform API (`/v3/global/asset/host`); STARTTLS is inferred from each SMTP
+  service's `tls` object. Verify the TLS field names against your plan's
+  response if version strings look empty.
 - **Broader test coverage** — `tests/test_smoke.py` covers scoring, DB
   round-trips, and the app factory; live-DNS integration tests are not included.
 - **Rate limiting / caching of passive lookups** for large domain sets.

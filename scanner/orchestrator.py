@@ -49,7 +49,8 @@ class ScanOrchestrator:
             (cfg.get("shodan") or {}).get("api_key"))
         censys_cfg = cfg.get("censys") or {}
         self.censys = CensysClient(
-            censys_cfg.get("api_id"), censys_cfg.get("api_secret"))
+            censys_cfg.get("personal_access_token"),
+            censys_cfg.get("organization_id"))
         self.dnsdumpster = DNSDumpsterClient(
             (cfg.get("dnsdumpster") or {}).get("api_key"))
         self.securitytrails = SecurityTrailsClient(

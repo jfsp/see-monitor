@@ -40,6 +40,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 # Make the project root importable regardless of the caller's CWD.
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -50,7 +51,8 @@ import requests  # noqa: E402  (third-party, already a runtime dependency)
 
 import see_monitor  # noqa: E402  (module; we override its frozen CONFIG_PATHS)
 from scanner.shodan_client import ShodanClient, _API as SHODAN_API  # noqa: E402
-from scanner.censys_client import CensysClient, _API as CENSYS_API  # noqa: E402
+from scanner.censys_client import (  # noqa: E402
+    CensysClient, _API as CENSYS_API, _CREDITS_PATH as CENSYS_CREDITS)
 from scanner.securitytrails_client import (  # noqa: E402
     SecurityTrailsClient, _BASE as ST_BASE)
 from scanner.dnsdumpster_client import (  # noqa: E402
@@ -94,39 +96,31 @@ def check_shodan(cfg, timeout, domain):
 
 def check_censys(cfg, timeout, domain):
     ccfg = cfg.get("censys") or {}
-    client = CensysClient(ccfg.get("api_id"), ccfg.get("api_secret"),
-                          timeout=timeout)
+    client = CensysClient(ccfg.get("personal_access_token"),
+                          ccfg.get("organization_id"), timeout=timeout)
     if not client.available:
-        return _r("censys", SKIP, "no api_id/api_secret in config")
-    # Account info lives on the LEGACY-Search v1 path (/api/v1/account), not v2
-    # — the v2 base URL only serves hosts/certificates. Derive the v1 URL from
-    # the client's exported base so the host is not duplicated.
-    account_url = CENSYS_API.rsplit("/api/", 1)[0] + "/api/v1/account"
-    # Legacy Search (search.censys.io, API ID + secret, HTTP Basic auth) is
-    # being deprecated by Censys in September 2026 in favour of the Censys
-    # Platform (platform.censys.io), which authenticates with a Personal Access
-    # Token + organisation ID. If the credentials are rejected, that migration
-    # is the most likely cause, so we say so.
-    _MIGRATE = ("key invalid or account migrated to the Censys Platform "
-                "(legacy Search deprecates Sep 2026; the Platform uses a "
-                "Personal Access Token + org id, not an API id/secret)")
+        return _r("censys", SKIP, "no personal_access_token in config")
+    # Validate the token against the Platform Free-user credit-balance endpoint,
+    # which "does not cost any credits to execute" — quota-free. Reuses the
+    # client's Bearer header + optional org-id params (no auth logic copied).
     try:
-        resp = requests.get(account_url,
-                            auth=(client.api_id, client.api_secret),
-                            timeout=timeout)
-        if resp.status_code in (401, 403):
+        resp = requests.get(CENSYS_API + CENSYS_CREDITS,
+                            headers=client._headers("application/json"),
+                            params=client._params(), timeout=timeout)
+        if resp.status_code == 401:
             return _r("censys", FAIL,
-                      f"credentials rejected ({resp.status_code}) — {_MIGRATE}")
+                      "token rejected (401) — the Personal Access Token is "
+                      "invalid or inactive")
         if resp.status_code == 404:
             return _r("censys", FAIL,
-                      "account endpoint not found (404) — the legacy Search API "
-                      "may already be retired for this account; " + _MIGRATE)
+                      "user not found (404) — token may be organisation-scoped; "
+                      "set censys.organization_id in config")
         resp.raise_for_status()
-        d = resp.json()
-        quota = d.get("quota") or {}
-        detail = (f"login={d.get('login', d.get('email', '?'))} "
-                  f"quota={quota.get('used', '?')}/{quota.get('allowance', '?')}")
-        return _r("censys", OK, detail, "quota-free (/api/v1/account)")
+        result = (resp.json().get("result") or {})
+        detail = f"balance={result.get('balance', '?')}"
+        if result.get("resets_at"):
+            detail += f" resets_at={result['resets_at']}"
+        return _r("censys", OK, detail, "quota-free (/v3/accounts/users/credits)")
     except Exception as exc:                       # noqa: BLE001
         return _r("censys", FAIL, _err(exc))
 
@@ -202,10 +196,21 @@ def check_crtsh(cfg, timeout, domain):
         # discover_subdomains never raises (a passive source must not abort a
         # scan), so an empty list is ambiguous. Probe reachability directly,
         # reusing the client's URL constant, then report the count it found.
-        resp = requests.get(CRTSH_URL,
-                            params={"q": f"%.{domain}", "output": "json"},
-                            timeout=timeout,
-                            headers={"User-Agent": "see-monitor/apicheck"})
+        # crt.sh frequently throws transient 502/503/504s, so retry briefly.
+        resp = None
+        for attempt in range(3):
+            resp = requests.get(CRTSH_URL,
+                                params={"q": f"%.{domain}", "output": "json"},
+                                timeout=timeout,
+                                headers={"User-Agent": "see-monitor/apicheck"})
+            if resp.status_code < 500:
+                break
+            if attempt < 2:
+                time.sleep(1.5)
+        if resp is not None and resp.status_code >= 500:
+            return _r("crtsh", FAIL,
+                      f"crt.sh transient server error ({resp.status_code}) after "
+                      f"3 tries — usually recovers, retry shortly")
         resp.raise_for_status()
         names = client.discover_subdomains(domain)
         return _r("crtsh", OK, f"{len(names)} name(s) for {domain}",

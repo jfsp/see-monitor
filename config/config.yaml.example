@@ -69,9 +69,17 @@ crtsh:
 shodan:
   api_key: ""
 
+# Censys (optional) — used as an alternative to Shodan for passive STARTTLS
+# evidence. SEE-Monitor uses the Censys PLATFORM API (api.platform.censys.io),
+# which authenticates with a Personal Access Token (Bearer). Create one at
+# https://accounts.censys.io/settings/personal-access-tokens . The legacy
+# Search API (API id/secret) is deprecated by Censys in September 2026 and is
+# no longer supported here. organization_id is optional: free-tier host lookups
+# work without it; set it if your token is organisation-scoped (it is shown in
+# the Platform web-UI URL). Validate with: python3 scripts/check_apis.py censys
 censys:
-  api_id: ""
-  api_secret: ""
+  personal_access_token: ""
+  organization_id: ""
 
 # DNSDumpster (optional) — used ONLY to discover DKIM selector names that are
 # hard to guess (e.g. ESP CNAME-delegated selectors). Discovered selectors are
