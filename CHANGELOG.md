@@ -4,6 +4,25 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.6.11] — 2026-07-28
+
+### Added
+- **`check_apis.py --verbose` (`-v`).** Prints each HTTP request, its status and
+  timing, per-service elapsed time, and the total run time to stderr, so a slow
+  run is easy to diagnose. Secrets (Authorization headers, `key`/`token`-type
+  query params) are redacted in the output. Elapsed time per service is also
+  included in `--json` output.
+
+### Changed
+- **`check_apis.py` crt.sh check fails fast.** crt.sh is frequently slow or
+  unavailable and its `%.<domain>` JSON response can be huge, which made it
+  dominate the run (a single 15 s read timeout). Its wait is now capped at 8 s,
+  it retries only on fast 5xx responses (a read timeout or 4xx no longer
+  triggers pointless retries), and it parses the subdomain count from the
+  response it already fetched instead of issuing a second heavy query. The
+  failure note now makes clear crt.sh flakiness is expected and does not affect
+  scoring or the keyed sources.
+
 ## [0.6.10] — 2026-07-28
 
 ### Changed (action required for Censys users)

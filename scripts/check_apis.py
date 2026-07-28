@@ -65,6 +65,35 @@ OK = "ok"
 FAIL = "fail"
 SKIP = "skip"          # not configured
 
+_VERBOSE = False
+# Query-param keys whose values must never be printed in verbose output.
+_SECRET_PARAMS = {"key", "api_key", "apikey", "token", "secret", "apitoken"}
+
+
+def _vlog(msg):
+    if _VERBOSE:
+        print(msg, file=sys.stderr)
+
+
+def _safe_params(params):
+    if not params:
+        return ""
+    red = {k: ("***" if k.lower() in _SECRET_PARAMS else v)
+           for k, v in params.items()}
+    return f" params={red}"
+
+
+def _get(label, url, timeout, **kw):
+    """requests.get with verbose timing. Secrets (Authorization header, known
+    secret query params) are never printed."""
+    t0 = time.monotonic()
+    _vlog(f"    → {label}: GET {url}{_safe_params(kw.get('params'))} "
+          f"(timeout={timeout}s)")
+    resp = requests.get(url, timeout=timeout, **kw)
+    _vlog(f"    ← {label}: HTTP {resp.status_code} in "
+          f"{time.monotonic() - t0:.2f}s")
+    return resp
+
 
 def _r(name, status, detail="", note=""):
     return {"service": name, "status": status, "detail": detail, "note": note}
@@ -80,8 +109,8 @@ def check_shodan(cfg, timeout, domain):
     if not client.available:
         return _r("shodan", SKIP, "no api_key in config")
     try:
-        resp = requests.get(f"{SHODAN_API}/api-info",
-                            params={"key": client.api_key}, timeout=timeout)
+        resp = _get("shodan", f"{SHODAN_API}/api-info", timeout,
+                    params={"key": client.api_key})
         if resp.status_code == 401:
             return _r("shodan", FAIL, "API key rejected (401)")
         resp.raise_for_status()
@@ -104,9 +133,9 @@ def check_censys(cfg, timeout, domain):
     # which "does not cost any credits to execute" — quota-free. Reuses the
     # client's Bearer header + optional org-id params (no auth logic copied).
     try:
-        resp = requests.get(CENSYS_API + CENSYS_CREDITS,
-                            headers=client._headers("application/json"),
-                            params=client._params(), timeout=timeout)
+        resp = _get("censys", CENSYS_API + CENSYS_CREDITS, timeout,
+                    headers=client._headers("application/json"),
+                    params=client._params())
         if resp.status_code == 401:
             return _r("censys", FAIL,
                       "token rejected (401) — the Personal Access Token is "
@@ -132,15 +161,16 @@ def check_securitytrails(cfg, timeout, domain):
         return _r("securitytrails", SKIP, "no api_key in config")
     headers = {"APIKEY": client.api_key, "Accept": "application/json"}
     try:
-        resp = requests.get(f"{ST_BASE}/ping", headers=headers, timeout=timeout)
+        resp = _get("securitytrails/ping", f"{ST_BASE}/ping", timeout,
+                    headers=headers)
         if resp.status_code == 401:
             return _r("securitytrails", FAIL, "API key rejected (401)")
         resp.raise_for_status()
         # Ping OK — add quota from the account/usage endpoint (also quota-free).
         detail = "ping ok"
         try:
-            u = requests.get(f"{ST_BASE}/account/usage", headers=headers,
-                             timeout=timeout)
+            u = _get("securitytrails/usage", f"{ST_BASE}/account/usage",
+                     timeout, headers=headers)
             if u.ok:
                 j = u.json()
                 detail = (f"allowed/month={j.get('allowed_monthly_usage', '?')} "
@@ -161,10 +191,9 @@ def check_dnsdumpster(cfg, timeout, domain):
     # We reuse the client's exported URL + stored key (no auth logic copied);
     # the client's own query() swallows the status code, which we want here.
     try:
-        resp = requests.get(DD_URL.format(domain=domain),
-                            headers={"X-API-Key": client.api_key,
-                                     "Accept": "application/json"},
-                            timeout=timeout)
+        resp = _get("dnsdumpster", DD_URL.format(domain=domain), timeout,
+                    headers={"X-API-Key": client.api_key,
+                             "Accept": "application/json"})
         if resp.status_code == 401:
             return _r("dnsdumpster", FAIL, "API key rejected (401)")
         if resp.status_code == 429:
@@ -192,31 +221,42 @@ def check_crtsh(cfg, timeout, domain):
         timeout=timeout)
     if not client.available:
         return _r("crtsh", SKIP, "disabled in config (crtsh.enabled=false)")
-    try:
-        # discover_subdomains never raises (a passive source must not abort a
-        # scan), so an empty list is ambiguous. Probe reachability directly,
-        # reusing the client's URL constant, then report the count it found.
-        # crt.sh frequently throws transient 502/503/504s, so retry briefly.
-        resp = None
-        for attempt in range(3):
-            resp = requests.get(CRTSH_URL,
-                                params={"q": f"%.{domain}", "output": "json"},
-                                timeout=timeout,
-                                headers={"User-Agent": "see-monitor/apicheck"})
+    # crt.sh is frequently slow or unavailable and the `%.<domain>` JSON dump can
+    # be large, so cap its wait well below the global timeout to avoid dragging
+    # the whole run. Retry only on fast 5xx responses; a read timeout is not
+    # retried (that would just multiply the wait).
+    ct = min(timeout, 8)
+    last = "no response"
+    for attempt in range(3):
+        try:
+            resp = _get(f"crtsh#{attempt + 1}", CRTSH_URL, ct,
+                        params={"q": f"%.{domain}", "output": "json"},
+                        headers={"User-Agent": "see-monitor/apicheck"})
+        except requests.exceptions.RequestException as exc:
+            last = _err(exc)
+            if "timed out" in last.lower() or "timeout" in last.lower():
+                break            # don't retry timeouts — fail fast
+            # otherwise a connection blip: retryable
+        else:
+            if resp.status_code < 400:
+                # Parse the count from the payload we already fetched (reuse the
+                # client's extractor) — no second heavy `%.` query.
+                try:
+                    names = client._extract(resp.json(), domain.strip().lower())
+                except Exception:                  # noqa: BLE001
+                    names = []
+                return _r("crtsh", OK, f"{len(names)} name(s) for {domain}",
+                          "no key / no quota")
             if resp.status_code < 500:
-                break
-            if attempt < 2:
-                time.sleep(1.5)
-        if resp is not None and resp.status_code >= 500:
-            return _r("crtsh", FAIL,
-                      f"crt.sh transient server error ({resp.status_code}) after "
-                      f"3 tries — usually recovers, retry shortly")
-        resp.raise_for_status()
-        names = client.discover_subdomains(domain)
-        return _r("crtsh", OK, f"{len(names)} name(s) for {domain}",
-                  "no key / no quota")
-    except Exception as exc:                       # noqa: BLE001
-        return _r("crtsh", FAIL, _err(exc))
+                return _r("crtsh", FAIL, f"crt.sh HTTP {resp.status_code}")
+            last = f"HTTP {resp.status_code}"       # 5xx: retryable
+        if attempt < 2:
+            _vlog(f"    crtsh: attempt {attempt + 1} failed ({last}); retrying")
+            time.sleep(1)
+    return _r("crtsh", FAIL,
+              f"crt.sh unavailable ({last})",
+              "crt.sh is frequently down/slow; CT subdomain discovery degrades "
+              "gracefully and does not affect scoring or the keyed sources")
 
 
 CHECKS = {
@@ -269,7 +309,12 @@ def main(argv=None):
                          "DNSDumpster, so pick a real one.")
     ap.add_argument("--timeout", type=int, default=15, help="per-request seconds")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="print each request, HTTP status and timing to stderr")
     args = ap.parse_args(argv)
+
+    global _VERBOSE
+    _VERBOSE = args.verbose
 
     selected = args.services or list(CHECKS)
     unknown = [s for s in selected if s not in CHECKS]
@@ -280,8 +325,19 @@ def main(argv=None):
 
     cfg, resolved = _load(args.config)
     searched = resolved or "none found"
+    _vlog(f"config: {searched}  |  timeout={args.timeout}s  |  "
+          f"domain={args.domain}  |  services={', '.join(selected)}")
 
-    results = [CHECKS[s](cfg, args.timeout, args.domain) for s in selected]
+    results = []
+    run_t0 = time.monotonic()
+    for s in selected:
+        _vlog(f"[{s}] checking…")
+        t0 = time.monotonic()
+        res = CHECKS[s](cfg, args.timeout, args.domain)
+        res["elapsed"] = round(time.monotonic() - t0, 2)
+        _vlog(f"[{s}] {res['status']} in {res['elapsed']}s")
+        results.append(res)
+    _vlog(f"total: {time.monotonic() - run_t0:.2f}s")
 
     if args.json:
         print(json.dumps({"config": args.config or None, "results": results},
@@ -292,7 +348,8 @@ def main(argv=None):
         print(f"SEE-Monitor API check  (config: {searched or 'none found'})")
         print("-" * 60)
         for r in results:
-            line = f"{sym[r['status']]} {r['service']:<{width}}  {r['detail']}"
+            tstr = f"  [{r['elapsed']}s]" if _VERBOSE else ""
+            line = f"{sym[r['status']]} {r['service']:<{width}}  {r['detail']}{tstr}"
             print(line)
             if r["note"]:
                 print(f"  {' ' * width}  ({r['note']})")

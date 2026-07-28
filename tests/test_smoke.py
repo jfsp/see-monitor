@@ -2199,3 +2199,26 @@ def test_censys_client_platform_host_parsing():
     assert out["ports"][25]["tls_version"] == "TLSv1.3"
     assert out["ports"][465]["starttls"] is None
     assert 80 not in out["ports"]      # non-SMTP port ignored
+
+
+def test_check_apis_verbose_and_timing(tmp_path, capsys):
+    """--verbose runs without error and results carry an 'elapsed' field."""
+    m = _load_check_apis()
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        "shodan: {api_key: ''}\n"
+        "censys: {personal_access_token: ''}\n"
+        "dnsdumpster: {api_key: ''}\n"
+        "securitytrails: {api_key: ''}\n"
+        "crtsh: {enabled: false}\n")
+    rc = m.main(["--config", str(cfg), "--verbose", "--json"])
+    assert rc == 0
+    out = capsys.readouterr()
+    data = _json_loads_last(out.out)
+    assert all("elapsed" in r for r in data["results"])
+
+
+def _json_loads_last(text):
+    import json as _json
+    # The JSON blob is the stdout payload (verbose logs go to stderr).
+    return _json.loads(text)
