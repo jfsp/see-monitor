@@ -324,45 +324,20 @@ if ! command -v systemctl &>/dev/null; then
     exit 0
 fi
 
-restart_service() {
-    local svc="$1" was_up="$2"
-    if [[ "${was_up}" != "true" ]]; then
-        warn "${svc} was not running before deploy — skipping restart."
-        return 0
-    fi
-    if ! systemctl restart "${svc}"; then
-        err "Failed to restart ${svc}"
-        (( ERRORS++ )) || true
-        return 0
-    fi
-    # Restarting web bounces the scheduler via its `Requires=`; poll for the
-    # unit to settle rather than reading a single racy instant.
-    local i
-    for i in $(seq 1 15); do
-        svc_up "${svc}" && { ok "Restarted ${svc}"; return 0; }
-        sleep 1
-    done
-    err "${svc} did not return to active after restart (check: systemctl status ${svc})"
-    (( ERRORS++ )) || true
-}
+# Shared, race-free restart helpers (svc_up / restart_units). See the library
+# header for why a pre-restart snapshot is required (scheduler Requires= web).
+RESTART_CTX="deploy"
+# shellcheck source=lib/systemd-restart.sh
+source "${SCRIPT_DIR}/lib/systemd-restart.sh"
 
-# True while the unit is up or coming up (active/activating/reloading).
-svc_up() {
-    local st
-    st=$(systemctl is-active "$1" 2>/dev/null || true)
-    [[ "${st}" == "active" || "${st}" == "activating" || "${st}" == "reloading" ]]
-}
+# Build the ordered restart list: web before scheduler (scheduler Requires= web).
+restart_list=()
+$needs_restart_web       && restart_list+=("see-monitor-web")       || warn "No restart needed: see-monitor-web"
+$needs_restart_scheduler && restart_list+=("see-monitor-scheduler") || warn "No restart needed: see-monitor-scheduler"
 
-# Snapshot BEFORE any restart: the scheduler `Requires=` web, so restarting web
-# propagates a stop+start to the scheduler. Checking the scheduler's live state
-# after that races with the propagation and wrongly reports it stopped. Decide
-# from the pre-restart snapshot instead.
-web_was_up=false;   svc_up "see-monitor-web"       && web_was_up=true
-sched_was_up=false; svc_up "see-monitor-scheduler" && sched_was_up=true
-
-# Web must restart before scheduler (scheduler Requires= web)
-$needs_restart_web       && restart_service "see-monitor-web"       "${web_was_up}"   || warn "No restart needed: see-monitor-web"
-$needs_restart_scheduler && restart_service "see-monitor-scheduler" "${sched_was_up}" || warn "No restart needed: see-monitor-scheduler"
+if (( ${#restart_list[@]} )); then
+    restart_units "${restart_list[@]}" || (( ERRORS++ )) || true
+fi
 
 if [[ ${ERRORS} -gt 0 ]]; then
     exit 1

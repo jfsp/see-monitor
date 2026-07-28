@@ -4,6 +4,23 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.6.7] — 2026-07-27
+
+Deploy-tooling refactor (no behaviour change from 0.6.6).
+
+### Changed
+- **Shared restart library.** The race-free service-restart logic added in
+  0.6.6 was duplicated in `sync-tree.sh` and `deploy.sh`. It now lives in a
+  single sourced library, `scripts/lib/systemd-restart.sh`, exposing `svc_up`
+  (treats active/activating/reloading as "up") and `restart_units UNIT...`
+  (snapshots state before restarting, restarts in the given order, polls each
+  unit to settle, returns non-zero if any fails). Both scripts source it and
+  pass their ordered unit list; the library is `set -euo pipefail`-safe and
+  falls back to plain loggers if the caller has not defined `ok/warn/err`, so it
+  can be exercised standalone. `RESTART_CTX` and `RESTART_SETTLE_TIMEOUT` are
+  overridable. `.gitattributes` already enforces LF on `*.sh`; the file is
+  sourced (no execute bit required, though `fix-permissions.sh` will set one).
+
 ## [0.6.6] — 2026-07-27
 
 Deploy-tooling fix.

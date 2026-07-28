@@ -381,57 +381,23 @@ if ! command -v systemctl &>/dev/null; then
     exit 0
 fi
 
-# True while the unit is up or on its way up. `systemctl is-active` prints a
-# single word; treat active/activating/reloading as "up" so a unit caught
-# mid-transition is not misread as stopped.
-svc_up() {
-    local st
-    st=$(systemctl is-active "$1" 2>/dev/null || true)
-    [[ "${st}" == "active" || "${st}" == "activating" || "${st}" == "reloading" ]]
-}
-
-# Snapshot state BEFORE touching anything. This is the crux of the fix:
-# see-monitor-scheduler has `Requires=see-monitor-web.service`, so restarting
-# the web unit makes systemd stop-and-restart the scheduler too. A live
-# is-active check on the scheduler taken *after* the web restart therefore
-# races against that propagation and can momentarily report it as stopped —
-# which is exactly why the old code printed "not running — skipping" for a
-# scheduler that was in fact running. Deciding from the pre-restart snapshot
-# reflects operator intent and is immune to the race.
-web_was_up=false;   svc_up "see-monitor-web"       && web_was_up=true
-sched_was_up=false; svc_up "see-monitor-scheduler" && sched_was_up=true
-
-# Restart a unit only if it was running before the sync (respecting a
-# deliberately-stopped service), then wait for it to settle and confirm.
-restart_service() {
-    local svc="$1" was_up="$2"
-    if [[ "${was_up}" != "true" ]]; then
-        warn "${svc} was not running before sync — skipping restart."
-        return 0
-    fi
-    if ! systemctl restart "${svc}"; then
-        err "Failed to restart ${svc}"
-        return 1
-    fi
-    # Dependency-propagated restarts can take a moment to converge; poll
-    # briefly instead of checking a single instant.
-    local i
-    for i in $(seq 1 15); do
-        svc_up "${svc}" && { ok "Restarted ${svc}"; return 0; }
-        sleep 1
-    done
-    err "${svc} did not return to active after restart (check: systemctl status ${svc})"
-    return 1
-}
+# Shared, race-free restart helpers (svc_up / restart_units). See the library
+# header for why a pre-restart snapshot is required (scheduler Requires= web).
+RESTART_CTX="sync"
+# shellcheck source=lib/systemd-restart.sh
+source "${SCRIPT_DIR}/lib/systemd-restart.sh"
 
 RC=0
-# Web must restart before scheduler (scheduler Requires= web). Restarting web
-# already bounces the scheduler via that dependency; restarting the scheduler
-# afterwards is idempotent and guarantees it ends up on the new code.
-if $needs_web;   then restart_service "see-monitor-web"       "${web_was_up}"   || RC=1
-else warn "No restart needed: see-monitor-web"; fi
-if $needs_sched; then restart_service "see-monitor-scheduler" "${sched_was_up}" || RC=1
-else warn "No restart needed: see-monitor-scheduler"; fi
+# Build the ordered restart list: web before scheduler (scheduler Requires=
+# web). Restarting web already bounces the scheduler via that dependency;
+# restarting the scheduler afterwards is idempotent and pins it to the new code.
+restart_list=()
+if $needs_web;   then restart_list+=("see-monitor-web");       else warn "No restart needed: see-monitor-web";       fi
+if $needs_sched; then restart_list+=("see-monitor-scheduler"); else warn "No restart needed: see-monitor-scheduler"; fi
+
+if (( ${#restart_list[@]} )); then
+    restart_units "${restart_list[@]}" || RC=1
+fi
 
 section "Done"
 ok "Synced ${#NEW_FILES[@]} new, ${#CHANGED_FILES[@]} changed, ${#FORCED[@]} forced; pruned ${#ORPHANS[@]}."
