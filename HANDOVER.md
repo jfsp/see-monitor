@@ -1,6 +1,6 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.6.5 · **Status:** functional, all tests passing (97) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.6.6 · **Status:** functional, all tests passing (97) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 > Final handover for this session. Recent additions are summarised in
 > `CHANGELOG.md` (0.3.0 profiles → 0.4.0 status dashboards + trends → 0.5.0 PDF
@@ -52,7 +52,7 @@ shows all profiles (`--profile` to limit).
 
 - **Working source (ephemeral):** `/home/claude/see/see-monitor` — resets
   between sessions. Do not rely on it persisting.
-- **Deliverable (persistent):** `see-monitor-0.6.5.zip` in the outputs area.
+- **Deliverable (persistent):** `see-monitor-0.6.6.zip` in the outputs area.
   **Start a new session by extracting this zip.**
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
@@ -418,7 +418,7 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 ## 9. Version & changelog convention
 
 - Version is single-sourced from the `VERSION` file (read by `version.py`).
-  Now at **0.6.5**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
+  Now at **0.6.6**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
   profiles) → 0.4.0 (status dashboards + trends) → 0.5.0 (PDF export) →
   0.5.1 (DB consistency checker + schema doc) → 0.6.0 (assessment depth:
   evidence model, certificate/DANE verification, DNS hygiene, reputation,
@@ -428,7 +428,9 @@ detail + per-service diagnostics (works before *or* after the subcommand);
   → 0.6.3 (no-mail domains rated N/A, skipped on scan unless --force,
   prune_no_mail.py cleanup) → 0.6.4 (fix: duplicate assessments; schema v4)
   → 0.6.5 (fix: control-rate denominators, apostrophe-in-org-name; scanning
-  admin-only; sortable admin tables; file-based in-app help).
+  admin-only; sortable admin tables; file-based in-app help)
+  → 0.6.6 (fix: deploy scripts falsely skipped scheduler restart due to a
+  Requires= dependency race).
   Full detail in `CHANGELOG.md`.
 - **Convention going forward:** every change ships with a Conventional-Commits
   changelog. The 0.1.0→0.2.0 commits are listed in the session notes; seed
@@ -439,7 +441,7 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 
 ## 10. First steps in the next session
 
-1. Extract `see-monitor-0.6.5.zip`; run `pytest tests/test_smoke.py -q`
+1. Extract `see-monitor-0.6.6.zip`; run `pytest tests/test_smoke.py -q`
    (expect 97 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
    clean base (the v2→v3 migration is applied on first `Database()` open).
 2. Pick from §8. Cheapest high-value items remain `SESSION_COOKIE_NAME` (§6)

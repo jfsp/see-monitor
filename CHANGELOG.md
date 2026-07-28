@@ -4,7 +4,29 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
-## [0.6.5] — 2026-07-27
+## [0.6.6] — 2026-07-27
+
+Deploy-tooling fix.
+
+### Fixed
+- **`sync-tree.sh`/`deploy.sh` falsely reported the scheduler as stopped.**
+  With `--restart`, the scripts restart `see-monitor-web` first, then checked
+  `systemctl is-active` on `see-monitor-scheduler` to decide whether to restart
+  it. But the scheduler unit declares `Requires=see-monitor-web.service`, so
+  restarting web makes systemd stop-and-restart the scheduler as well. The live
+  check raced against that propagation and caught the scheduler mid-transition,
+  printing `⚠ see-monitor-scheduler is not running — skipping restart.` for a
+  service that was in fact running (and moments later back to `active`).
+
+  Both scripts now (1) **snapshot** each unit's state *before* any restart, so
+  the decision reflects operator intent rather than a state the script's own web
+  restart just perturbed; (2) treat `active`/`activating`/`reloading` as "up";
+  and (3) after issuing a restart, **poll for the unit to settle** (up to ~15s)
+  before reporting success or failure. A service that was deliberately stopped
+  before the sync is still skipped, now with an accurate message.
+
+
+
 
 Bug-fix and hardening release: corrects the Overview control-implementation
 denominators, locks scanning to admins, makes the admin tables sortable, fixes

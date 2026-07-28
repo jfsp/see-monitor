@@ -325,22 +325,44 @@ if ! command -v systemctl &>/dev/null; then
 fi
 
 restart_service() {
-    local svc="$1"
-    if systemctl is-active --quiet "${svc}" 2>/dev/null; then
-        if systemctl restart "${svc}"; then
-            ok "Restarted ${svc}"
-        else
-            err "Failed to restart ${svc}"
-            (( ERRORS++ )) || true
-        fi
-    else
-        warn "${svc} is not running — skipping restart."
+    local svc="$1" was_up="$2"
+    if [[ "${was_up}" != "true" ]]; then
+        warn "${svc} was not running before deploy — skipping restart."
+        return 0
     fi
+    if ! systemctl restart "${svc}"; then
+        err "Failed to restart ${svc}"
+        (( ERRORS++ )) || true
+        return 0
+    fi
+    # Restarting web bounces the scheduler via its `Requires=`; poll for the
+    # unit to settle rather than reading a single racy instant.
+    local i
+    for i in $(seq 1 15); do
+        svc_up "${svc}" && { ok "Restarted ${svc}"; return 0; }
+        sleep 1
+    done
+    err "${svc} did not return to active after restart (check: systemctl status ${svc})"
+    (( ERRORS++ )) || true
 }
 
+# True while the unit is up or coming up (active/activating/reloading).
+svc_up() {
+    local st
+    st=$(systemctl is-active "$1" 2>/dev/null || true)
+    [[ "${st}" == "active" || "${st}" == "activating" || "${st}" == "reloading" ]]
+}
+
+# Snapshot BEFORE any restart: the scheduler `Requires=` web, so restarting web
+# propagates a stop+start to the scheduler. Checking the scheduler's live state
+# after that races with the propagation and wrongly reports it stopped. Decide
+# from the pre-restart snapshot instead.
+web_was_up=false;   svc_up "see-monitor-web"       && web_was_up=true
+sched_was_up=false; svc_up "see-monitor-scheduler" && sched_was_up=true
+
 # Web must restart before scheduler (scheduler Requires= web)
-$needs_restart_web       && restart_service "see-monitor-web"       || warn "No restart needed: see-monitor-web"
-$needs_restart_scheduler && restart_service "see-monitor-scheduler" || warn "No restart needed: see-monitor-scheduler"
+$needs_restart_web       && restart_service "see-monitor-web"       "${web_was_up}"   || warn "No restart needed: see-monitor-web"
+$needs_restart_scheduler && restart_service "see-monitor-scheduler" "${sched_was_up}" || warn "No restart needed: see-monitor-scheduler"
 
 if [[ ${ERRORS} -gt 0 ]]; then
     exit 1
