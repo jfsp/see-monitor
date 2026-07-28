@@ -4,6 +4,27 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.6.9] — 2026-07-28
+
+### Fixed
+- **`check_apis.py` — Censys check hit the wrong endpoint.** It queried
+  `/api/v2/account`, which does not exist (the v2 base serves only
+  hosts/certificates), producing a confusing `404`. Account/quota lives on the
+  Legacy-Search v1 path; the check now uses `/api/v1/account` (HTTP Basic auth,
+  matching the scanner client). On `401/403`/`404` it now explains the likely
+  cause: Censys is deprecating Legacy Search (`search.censys.io`, API id/secret)
+  in September 2026 in favour of the Censys Platform (`platform.censys.io`),
+  which authenticates with a Personal Access Token + organisation id. This makes
+  an invalid/migrated Censys credential visible instead of silently yielding no
+  passive data during scans.
+- **`check_apis.py` — DNSDumpster domain-rejection was misreported as an API
+  failure.** DNSDumpster refuses some domains (notably reserved ones like
+  `example.com`) with `400 {"error":"Invalid domain"}`. Because a bad key
+  returns `401`, a `400` domain rejection actually proves the key
+  authenticated. The check now treats that case as **OK (key valid)** with a
+  note, rather than a failure, and the default `--domain` changed from
+  `example.com` to `google.com` so a normal run performs a real lookup.
+
 ## [0.6.8] — 2026-07-28
 
 ### Added

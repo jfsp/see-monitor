@@ -2090,3 +2090,60 @@ def test_check_apis_all_unconfigured_exit_zero(tmp_path):
         "securitytrails: {api_key: ''}\n"
         "crtsh: {enabled: false}\n")
     assert m.main(["--config", str(cfg)]) == 0
+
+
+class _FakeResp:
+    def __init__(self, status, text="", js=None):
+        self.status_code = status
+        self.text = text
+        self._js = js or {}
+
+    def json(self):
+        return self._js
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"{self.status_code} error")
+
+
+def test_check_apis_censys_v1_account_and_migration_hint():
+    """Censys check uses the v1 account path and, on auth failure, explains the
+    Legacy-Search -> Platform migration rather than a bare error."""
+    m = _load_check_apis()
+    account_url = m.CENSYS_API.rsplit("/api/", 1)[0] + "/api/v1/account"
+    assert account_url == "https://search.censys.io/api/v1/account"
+
+    orig = m.requests.get
+    try:
+        m.requests.get = lambda u, **k: _FakeResp(401)
+        r = m.check_censys({"censys": {"api_id": "x", "api_secret": "y"}},
+                           5, "google.com")
+        assert r["status"] == m.FAIL and "Platform" in r["detail"]
+
+        m.requests.get = lambda u, **k: _FakeResp(
+            200, js={"login": "me", "quota": {"used": 8, "allowance": 250}})
+        r = m.check_censys({"censys": {"api_id": "x", "api_secret": "y"}},
+                           5, "google.com")
+        assert r["status"] == m.OK and "8/250" in r["detail"]
+    finally:
+        m.requests.get = orig
+
+
+def test_check_apis_dnsdumpster_domain_rejection_is_not_failure():
+    """A 400 'Invalid domain' proves the key authenticated, so it must be
+    reported as OK (key valid) — not as the API being down."""
+    m = _load_check_apis()
+    orig = m.requests.get
+    try:
+        m.requests.get = lambda u, **k: _FakeResp(
+            400, text='{"error":"Invalid domain"}')
+        r = m.check_dnsdumpster({"dnsdumpster": {"api_key": "KEY"}},
+                                5, "example.com")
+        assert r["status"] == m.OK and "rejected domain" in r["detail"]
+
+        m.requests.get = lambda u, **k: _FakeResp(401, text="unauthorized")
+        r = m.check_dnsdumpster({"dnsdumpster": {"api_key": "BAD"}},
+                                5, "google.com")
+        assert r["status"] == m.FAIL and "401" in r["detail"]
+    finally:
+        m.requests.get = orig

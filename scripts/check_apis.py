@@ -98,19 +98,35 @@ def check_censys(cfg, timeout, domain):
                           timeout=timeout)
     if not client.available:
         return _r("censys", SKIP, "no api_id/api_secret in config")
+    # Account info lives on the LEGACY-Search v1 path (/api/v1/account), not v2
+    # — the v2 base URL only serves hosts/certificates. Derive the v1 URL from
+    # the client's exported base so the host is not duplicated.
+    account_url = CENSYS_API.rsplit("/api/", 1)[0] + "/api/v1/account"
+    # Legacy Search (search.censys.io, API ID + secret, HTTP Basic auth) is
+    # being deprecated by Censys in September 2026 in favour of the Censys
+    # Platform (platform.censys.io), which authenticates with a Personal Access
+    # Token + organisation ID. If the credentials are rejected, that migration
+    # is the most likely cause, so we say so.
+    _MIGRATE = ("key invalid or account migrated to the Censys Platform "
+                "(legacy Search deprecates Sep 2026; the Platform uses a "
+                "Personal Access Token + org id, not an API id/secret)")
     try:
-        resp = requests.get(f"{CENSYS_API}/account",
+        resp = requests.get(account_url,
                             auth=(client.api_id, client.api_secret),
                             timeout=timeout)
         if resp.status_code in (401, 403):
             return _r("censys", FAIL,
-                      f"credentials rejected ({resp.status_code})")
+                      f"credentials rejected ({resp.status_code}) — {_MIGRATE}")
+        if resp.status_code == 404:
+            return _r("censys", FAIL,
+                      "account endpoint not found (404) — the legacy Search API "
+                      "may already be retired for this account; " + _MIGRATE)
         resp.raise_for_status()
         d = resp.json()
         quota = d.get("quota") or {}
-        detail = (f"login={d.get('email', d.get('login', '?'))} "
+        detail = (f"login={d.get('login', d.get('email', '?'))} "
                   f"quota={quota.get('used', '?')}/{quota.get('allowance', '?')}")
-        return _r("censys", OK, detail, "quota-free (/account)")
+        return _r("censys", OK, detail, "quota-free (/api/v1/account)")
     except Exception as exc:                       # noqa: BLE001
         return _r("censys", FAIL, _err(exc))
 
@@ -159,6 +175,14 @@ def check_dnsdumpster(cfg, timeout, domain):
             return _r("dnsdumpster", FAIL, "API key rejected (401)")
         if resp.status_code == 429:
             return _r("dnsdumpster", FAIL, "quota / rate limit exceeded (429)")
+        # A 400 "Invalid domain" means the request authenticated fine (a bad key
+        # would be 401) and the API simply rejected THIS domain — some domains,
+        # notably reserved ones like example.com, are refused. That is proof the
+        # API + key work, not a failure of the service.
+        if resp.status_code == 400 and "domain" in resp.text.lower():
+            return _r("dnsdumpster", OK,
+                      f"key valid; provider rejected domain '{domain}'",
+                      "API/key OK — pass a resolvable --domain to see a lookup")
         resp.raise_for_status()
         resp.json()  # ensure it parses
         return _r("dnsdumpster", OK, f"lookup for {domain} ok",
@@ -233,9 +257,11 @@ def main(argv=None):
     ap.add_argument("--config", metavar="PATH",
                     help="config file (default: SEE_CONFIG, ./config/config.yaml, "
                          "/etc/see-monitor/config.yaml)")
-    ap.add_argument("--domain", default="example.com",
+    ap.add_argument("--domain", default="google.com",
                     help="domain used by lookups that need one "
-                         "(dnsdumpster, crtsh). Default: example.com")
+                         "(dnsdumpster, crtsh). Default: google.com. "
+                         "Reserved domains like example.com are rejected by "
+                         "DNSDumpster, so pick a real one.")
     ap.add_argument("--timeout", type=int, default=15, help="per-request seconds")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
