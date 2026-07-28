@@ -45,6 +45,14 @@ DKIM selectors and CT subdomain names alike — is re-confirmed against
 authoritative DNS before it can affect scoring; passive sources never feed the
 score directly.
 
+**Checking API connectivity.** To confirm the configured keys work, run
+`python3 scripts/check_apis.py` (test all) or name services, e.g.
+`scripts/check_apis.py shodan censys`. It uses quota-free health/account
+endpoints where available (Shodan `/api-info`, Censys `/account`,
+SecurityTrails `/ping`); DNSDumpster has none, so it does one real lookup, and
+crt.sh needs no key. Exit code is `0` if every configured service passed, `1`
+if any failed. `--json`, `--config PATH` and `--domain` are supported.
+
 **Connection budget.** Active probing is one TCP connection per MX host. The
 banner, the EHLO capability list, the negotiated TLS parameters, the PKIX
 verdict and the certificate used for DANE matching all come from that single

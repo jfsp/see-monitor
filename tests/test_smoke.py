@@ -2044,3 +2044,49 @@ def test_admin_shell_escapes_names_for_inline_handlers():
     assert "deleteOrg(${o.id},'${esc(o.name)}')" not in src
     # And the safe form must be present.
     assert "openOrgDomains(${o.id},${jss(o.name)})" in src
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.6.8 — passive-API connectivity checker (scripts/check_apis.py)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _load_check_apis():
+    import importlib.util
+    path = os.path.join(os.path.dirname(__file__), "..", "scripts",
+                        "check_apis.py")
+    spec = importlib.util.spec_from_file_location("check_apis", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_check_apis_registry_and_unconfigured_skip():
+    """Every keyed service reports 'skip' (no network) when its key is absent."""
+    m = _load_check_apis()
+    assert set(m.CHECKS) == {
+        "shodan", "censys", "dnsdumpster", "securitytrails", "crtsh"}
+    empty = {}
+    for svc in ("shodan", "censys", "dnsdumpster", "securitytrails"):
+        res = m.CHECKS[svc](empty, 5, "example.com")
+        assert res["status"] == m.SKIP, (svc, res)
+    # crtsh with enabled=false also skips without touching the network.
+    res = m.CHECKS["crtsh"]({"crtsh": {"enabled": False}}, 5, "example.com")
+    assert res["status"] == m.SKIP
+
+
+def test_check_apis_unknown_service_exit_code():
+    """An unknown service name is a usage error (exit 2), not a check failure."""
+    m = _load_check_apis()
+    assert m.main(["definitely-not-a-service"]) == 2
+
+
+def test_check_apis_all_unconfigured_exit_zero(tmp_path):
+    """A config with no keys set yields exit 0 (nothing failed, all skipped)."""
+    m = _load_check_apis()
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        "shodan: {api_key: ''}\n"
+        "censys: {api_id: '', api_secret: ''}\n"
+        "dnsdumpster: {api_key: ''}\n"
+        "securitytrails: {api_key: ''}\n"
+        "crtsh: {enabled: false}\n")
+    assert m.main(["--config", str(cfg)]) == 0

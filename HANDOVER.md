@@ -1,6 +1,6 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.6.7 · **Status:** functional, all tests passing (97) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.6.8 · **Status:** functional, all tests passing (100) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 > Final handover for this session. Recent additions are summarised in
 > `CHANGELOG.md` (0.3.0 profiles → 0.4.0 status dashboards + trends → 0.5.0 PDF
@@ -52,12 +52,12 @@ shows all profiles (`--profile` to limit).
 
 - **Working source (ephemeral):** `/home/claude/see/see-monitor` — resets
   between sessions. Do not rely on it persisting.
-- **Deliverable (persistent):** `see-monitor-0.6.7.zip` in the outputs area.
+- **Deliverable (persistent):** `see-monitor-0.6.8.zip` in the outputs area.
   **Start a new session by extracting this zip.**
 - **Lineage reference:** the original pqc-monitor tree was at
   `/home/claude/pqc/pqc-monitor-1.9.1` (also ephemeral).
 
-Run tests: `python3 -m pytest tests/test_smoke.py -q` (97 passing).
+Run tests: `python3 -m pytest tests/test_smoke.py -q` (100 passing).
 DB audit:  `python3 scripts/db_check.py --db data/see_monitor.db` (read-only).
 Compile check: `python3 -m py_compile $(find . -name "*.py" -not -path "*__pycache__*")`.
 
@@ -418,7 +418,7 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 ## 9. Version & changelog convention
 
 - Version is single-sourced from the `VERSION` file (read by `version.py`).
-  Now at **0.6.7**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
+  Now at **0.6.8**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national
   profiles) → 0.4.0 (status dashboards + trends) → 0.5.0 (PDF export) →
   0.5.1 (DB consistency checker + schema doc) → 0.6.0 (assessment depth:
   evidence model, certificate/DANE verification, DNS hygiene, reputation,
@@ -442,8 +442,8 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 
 ## 10. First steps in the next session
 
-1. Extract `see-monitor-0.6.7.zip`; run `pytest tests/test_smoke.py -q`
-   (expect 97 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
+1. Extract `see-monitor-0.6.8.zip`; run `pytest tests/test_smoke.py -q`
+   (expect 100 passing) and `python3 scripts/db_check.py --db <db>` to confirm a
    clean base (the v2→v3 migration is applied on first `Database()` open).
 2. Pick from §8. Cheapest high-value items remain `SESSION_COOKIE_NAME` (§6)
    and the passive-key env/config gap (§5).

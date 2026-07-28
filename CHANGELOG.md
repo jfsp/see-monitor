@@ -4,6 +4,25 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.6.8] — 2026-07-28
+
+### Added
+- **`scripts/check_apis.py` — passive-API connectivity checker.** Verifies that
+  the passive-intelligence services configured in `config.yaml` are reachable
+  and that their credentials work, using the keys already in the file. One
+  bundled script covers all of them; run with no arguments to test everything or
+  name services to narrow it (`check_apis.py shodan censys`). `--config`,
+  `--domain`, `--timeout` and `--json` are supported. Checks are **quota-free**
+  where the provider offers a health/account endpoint — Shodan `/api-info`,
+  Censys `/account`, SecurityTrails `/ping` (+ `/account/usage` for quota);
+  DNSDumpster has no such endpoint, so it does one real lookup (labelled as
+  consuming a request), and crt.sh is keyless/quota-free. The script reuses the
+  real `scanner/*_client.py` classes and their exported base URLs rather than
+  duplicating any auth logic, and reuses `see_monitor.load_config()` for config
+  discovery. Exit codes: `0` all configured services passed, `1` at least one
+  failed, `2` bad invocation. An unconfigured service is reported and skipped
+  without failing the run.
+
 ## [0.6.7] — 2026-07-27
 
 Deploy-tooling refactor (no behaviour change from 0.6.6).
