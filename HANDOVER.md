@@ -1,18 +1,13 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.6.11 · **Status:** functional, all tests passing (104) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.7.0 · **Status:** functional, all tests passing · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
-> Final handover for this session. Recent additions are summarised in
-> `CHANGELOG.md` (0.3.0 profiles → 0.4.0 status dashboards + trends → 0.5.0 PDF
-> export → 0.5.1 DB consistency checker + schema doc → **0.6.0 assessment
-> depth: evidence model, certificate/DANE verification, DNS hygiene,
-> reputation, subdomain coverage, sub-scores** → **0.6.1 scheduler coverage:
-> multi-profile scheduled runs, schedule audit tool, `--rescan-all`** →
-> **0.6.2 bulk organisation import** → **0.6.3 no-mail domains: N/A rating,
-> scan-time skip (`--force`), `prune_no_mail.py` cleanup** → **0.6.4 fix:
-> duplicate assessments after re-assessment; schema v4 uniqueness** →
-> **0.6.5 fix: control-rate denominators, apostrophe-in-org-name; scanning
-> restricted to admins; sortable admin tables; file-based in-app help**).
+> Recent additions are summarised in `CHANGELOG.md` (… → **0.6.5 control-rate
+> denominators, admin-only scanning, file-based help** → 0.6.11 fix-and-refine
+> cycle → **0.7.0 active SMTP transport TLS: reconcile strategy across
+> local-active / passive / MXToolbox remote-active, 587/465 folded onto the MX
+> hosts, DANE/MTA-STS intent reconciliation, egress-25 detection, configurable
+> HELO name**).
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -285,6 +280,13 @@ verify_reporting,fcrdns,subdomain_check,max_subdomains}`,
 `dnsdumpster.api_key`, `securitytrails.api_key`, `scoring.{weights,rating_bands,
 very_strong_requirements}`.
 
+**SMTP transport TLS config (0.7.0):** `scanning.helo_name` (default
+`escbmail.eu`; HELO/EHLO on ports 25 and 587), `scanning.smtp_tls_strategy`
+(default `reconcile`; also `active_first` / `passive_first` / `active_only` /
+`passive_only`), and the `mxtoolbox` block: `api_key` (UUID; SMTP is a *paid*
+network lookup), `mode` (`fallback` default / `always` / `off`), `timeout`.
+`scanning.active_smtp` still gates all local connections.
+
 **Important gap:** the orchestrator reads passive-source API keys from
 `config.yaml` (`cfg.get("shodan")…`), **not** from the systemd env vars
 (`SHODAN_API_KEY`, `SECURITYTRAILS_API_KEY`, …). Those env lines are currently
@@ -360,6 +362,23 @@ detail + per-service diagnostics (works before *or* after the subcommand);
   blocklist listings fall.
 - **Lineage comments:** `auth/`, `admin/`, `data/geo_inference.py` retain some
   "PQC-Monitor" attribution comments (intentional).
+- **MXToolbox result-field mapping unverified (0.7.0).** `mxtoolbox_client.
+  _parse_tls` scans the SMTP lookup's `Passed/Warnings/Failed/Errors/
+  Information/Transactions` arrays for TLS keywords. The exact `Name`/`Info`
+  strings were **not** confirmed against a live *paid* response (the SMTP
+  lookup is a network lookup; the sandbox has no key and `api.mxtoolbox.com`
+  is outside its egress allowlist). The parser fails safe: an unrecognised
+  result returns `starttls=None` (→ `unknown`), never a false `no_tls`. Verify
+  against a real response on the server and tighten the markers if needed.
+  `scripts/check_apis.py mxtoolbox` exercises the quota-free `/Usage` endpoint
+  (auth + network quota) without spending a network lookup.
+- **STARTTLS reconcile precedence (0.7.0), do not silently change.** A positive
+  STARTTLS from any *active* source (local probe or MXToolbox) wins; a reachable
+  local `no_tls` beats passive; passive only fills gaps. `all_starttls` is
+  computed on inbound port-25 hosts **only** (keeps the "all MX offer STARTTLS"
+  requirement aligned with NIST §5.1), while the numeric score blends 25/587/465
+  via `supported/no_tls/unknown` counts. Changing either the precedence or the
+  inbound-only `all_starttls` scope shifts scores across every profile.
 
 ---
 
@@ -412,6 +431,22 @@ detail + per-service diagnostics (works before *or* after the subcommand);
    temporarily broken resolver would silently reclassify a real mail domain as
    "no email", so any implementation should require the failure to be
    unambiguous (all targets NXDOMAIN, not SERVFAIL/timeout).
+16. **OPEN — verify MXToolbox SMTP field mapping (0.7.0).** Confirm
+    `mxtoolbox_client._parse_tls` against a live paid `Lookup/smtp/` response
+    and tighten the positive/negative markers. Parser currently fails safe
+    (unknown, never false negative). See §7.
+17. **BACKLOG — Tier 2 passive sources (more egress-independent votes).**
+    BinaryEdge (REST API, ~$10/mo) and Onyphe expose port-25 STARTTLS banners
+    in the same shape as Shodan/Censys. Wiring them as extra passive clients
+    strengthens the `reconcile` fallback and mismatch detection when local
+    egress-25 is blocked. Same `host_smtp_info(host) -> {ports:{25:{starttls}}}`
+    interface; add config blocks mirroring `shodan:`/`censys:`.
+18. **BACKLOG — Tier 3 second remote-active source (internet.nl).** internet.nl
+    batch API tests STARTTLS + DANE from its own vantage (RFC 3207/7672),
+    complementing MXToolbox as a second egress-independent active source. Open
+    source, aligns with the standards profiles; requires batch-API account
+    approval. Worth adding if egress-25 blocking on the SEE-Monitor host proves
+    common (it is on the current pqc-monitor co-host).
 
 ---
 

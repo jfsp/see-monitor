@@ -4,6 +4,67 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.7.0] — 2026-08-06
+
+### Added
+- **Active SMTP transport TLS, reconciled across sources.** STARTTLS is no
+  longer decided by Shodan/Censys with the live probe as a rarely-reached
+  fallback. The `starttls` control now consults every configured source and
+  reconciles them (`scanning.smtp_tls_strategy`, default `reconcile`): a
+  positive STARTTLS observation from **any active source** wins; a reachable
+  local probe seeing STARTTLS absent/refused yields `no_tls`; passive banner
+  data fills gaps at lower confidence; otherwise `unknown` (never a failure).
+  When sources conflict the active result is used and an informational issue
+  records the disagreement (stale-passive-intel signal). Other strategies:
+  `active_first`, `passive_first` (legacy), `active_only`, `passive_only`.
+- **587/465 folded into the STARTTLS score, probed on the MX hosts.** SMTP
+  submission STARTTLS (587) and implicit TLS (465) are now probed on each MX
+  host and blended into the STARTTLS control's score (`by_port` breakdown
+  retained). SRV-only discovery found these almost nowhere; probing the MX
+  hosts is what makes the fold meaningful. `all_starttls` (the "all MX offer
+  STARTTLS" requirement) is still computed on port 25 only, so the requirement
+  stays aligned with NIST SP 800-177r1 §5.1 while the numeric score widens.
+- **MXToolbox as a remote, egress-independent active source.**
+  `scanner/mxtoolbox_client.py`. MXToolbox runs its SMTP diagnostic from its
+  own network, so it confirms a target's port-25 TLS even when this host cannot
+  open port 25 outbound. Key-gated (`mxtoolbox.api_key`); `mode: fallback`
+  (default — query only MX hosts the local probe could not determine),
+  `always`, or `off`. The SMTP lookup is a paid *network* lookup, so `fallback`
+  conserves quota. `scripts/check_apis.py` gains an `mxtoolbox` check (uses the
+  quota-free `/Usage` endpoint; warns when network quota is 0).
+- **Tier-1 intent reconciliation.** After DANE and MTA-STS are evaluated, the
+  scan cross-checks them against the STARTTLS verdict: if DANE TLSA is usable or
+  MTA-STS is `mode=enforce` but STARTTLS is not confirmed on an inbound host,
+  an `intent_mismatch` finding is raised — declared policy and observed
+  transport disagree. No new connections are made.
+- **Egress-25 detection.** If active probing is enabled but every local port-25
+  connection fails at the transport layer, the scan sets `egress25_blocked` and
+  explains that inbound verdicts rely on passive/remote sources — the exact
+  cause of "active SMTP N/N MX → unknown" on port-25-filtered hosts.
+- **Configurable HELO/EHLO name** (`scanning.helo_name`, default `escbmail.eu`),
+  threaded into the active probe on ports 25 and 587 (previously hardcoded to
+  `see-monitor.invalid` and, in fact, dropped before reaching the probe).
+- **Active-probe logging.** The probe now logs connect / EHLO / STARTTLS /
+  handshake / transport-failure at INFO, so `scan -v` shows the live probe
+  (previously only Shodan/Censys diagnostics were visible under `-v`).
+
+### Changed
+- **`client_tls` is now IMAP/POP retrieval only.** SMTP submission (587/465)
+  moved into the STARTTLS transport control (above). `client_tls` keeps its
+  IMAPS/POP3S scope and its CCN-CERT BP/02 weight; guideline weights are
+  otherwise unchanged.
+- **`scan -v` STARTTLS detail** shows the true status (`ok`/`no`/`unknown`),
+  the determining source, a `(disagree)` marker, and, for unknowns, the
+  underlying error — instead of printing `no` for anything not confirmed `ok`.
+  The Sources panel reports MXToolbox usage and an egress-25 warning.
+
+### Migration
+- No schema change. Run `scripts/reassess_all.py` after deploying so folded
+  587/465 evidence and reconciled verdicts are reflected; run
+  `see_monitor.py scan --rescan-all` to gather the new 587/465 data (reassess
+  alone cannot, as older scans lack it). MXToolbox is optional and off until an
+  API key is set.
+
 ## [0.6.11] — 2026-07-28
 
 ### Added

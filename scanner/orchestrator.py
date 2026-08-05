@@ -29,8 +29,38 @@ from scanner.shodan_client import ShodanClient
 from scanner.censys_client import CensysClient
 from scanner.dnsdumpster_client import DNSDumpsterClient
 from scanner.securitytrails_client import SecurityTrailsClient
+from scanner.mxtoolbox_client import MXToolboxClient
 
 logger = logging.getLogger(__name__)
+
+
+def _reconcile_tls_intent(checks: dict) -> None:
+    """
+    Append an intent-mismatch issue to the STARTTLS control when the domain
+    DECLARES that TLS is mandatory (DANE TLSA usable, or MTA-STS mode=enforce)
+    but STARTTLS was not confirmed on one or more inbound MX hosts. Mutates
+    checks["starttls"]["issues"] in place. No new connections are made.
+    """
+    st = checks.get("starttls") or {}
+    if not st.get("applicable"):
+        return
+    dane = checks.get("dane") or {}
+    sts = checks.get("mta_sts") or {}
+    mandated = bool(dane.get("usable")) or (sts.get("mode") == "enforce")
+    if not mandated:
+        return
+    # inbound (:25) hosts that are not confirmed ok
+    unconfirmed = [h for h, v in (st.get("hosts") or {}).items()
+                   if ":" not in h and v.get("status") != "ok"]
+    if not unconfirmed:
+        return
+    who = "DANE (TLSA usable)" if dane.get("usable") else "MTA-STS mode=enforce"
+    st.setdefault("issues", []).append(
+        f"{who} mandates TLS, but STARTTLS is not confirmed on: "
+        + ", ".join(unconfirmed)
+        + " — declared policy and observed transport disagree "
+          "(mail delivery to these hosts may fail or fall back to cleartext)")
+    st["intent_mismatch"] = True
 
 
 class ScanOrchestrator:
@@ -41,6 +71,10 @@ class ScanOrchestrator:
         scan_cfg = cfg.get("scanning", {})
         self.timeout = int(scan_cfg.get("timeout", 10))
         self.active_smtp = bool(scan_cfg.get("active_smtp", True))
+        self.helo_name = str(scan_cfg.get("helo_name", "escbmail.eu")).strip() \
+            or "escbmail.eu"
+        self.smtp_tls_strategy = str(
+            scan_cfg.get("smtp_tls_strategy", "reconcile")).lower()
         self.dkim_wordlist = bool(scan_cfg.get("dkim_wordlist", True))
         nameservers = scan_cfg.get("nameservers") or None
         self.dns = DNSClient(nameservers=nameservers)
@@ -55,6 +89,11 @@ class ScanOrchestrator:
             (cfg.get("dnsdumpster") or {}).get("api_key"))
         self.securitytrails = SecurityTrailsClient(
             (cfg.get("securitytrails") or {}).get("api_key"))
+        mxt_cfg = cfg.get("mxtoolbox") or {}
+        self.mxtoolbox = MXToolboxClient(
+            mxt_cfg.get("api_key"),
+            mode=mxt_cfg.get("mode", "fallback"),
+            timeout=int(mxt_cfg.get("timeout", 20)))
 
         # ---- v0.6.0 options ------------------------------------------
         self.verify_mx_certs = bool(scan_cfg.get("verify_mx_certs", True))
@@ -150,13 +189,20 @@ class ScanOrchestrator:
         # opening another one.
         checks["starttls"] = self._safe(
             check_starttls, mx_hosts, self.shodan, self.censys,
-            self.active_smtp, self.timeout, self.verify_mx_certs)
+            self.active_smtp, self.timeout, self.verify_mx_certs,
+            self.helo_name, self.smtp_tls_strategy, self.mxtoolbox)
         chains = checks["starttls"].pop("_chains", {}) or {}
 
         checks["dane"] = self._safe(
             check_dane, mx_hosts, dnssec_valid, self.dns, chains)
         checks["mta_sts"] = self._safe(
             check_mta_sts, domain, mx_hosts, self.dns, self.timeout)
+
+        # Tier-1 reconciliation: cross-check the STARTTLS verdict against the
+        # domain's DECLARED TLS intent (DANE TLSA usable / MTA-STS enforce).
+        # If TLS is mandated by policy but not confirmed, that is a stronger
+        # finding than a plain source disagreement.
+        _reconcile_tls_intent(checks)
         checks["tlsrpt"] = self._safe(check_tlsrpt, domain, self.dns)
         checks["client_tls"] = self._safe(
             check_client_tls, domain, self.dns, self.active_smtp, self.timeout)
@@ -201,11 +247,17 @@ class ScanOrchestrator:
                     pass
 
         # ---- Which external services were used, and what they yielded -----
-        st_hosts = checks.get("starttls", {}).get("hosts", {}) or {}
+        st_res = checks.get("starttls", {}) or {}
+        st_hosts = st_res.get("hosts", {}) or {}
+        # Count only inbound (:25) verdicts so "X/Y MX" stays per-MX, not
+        # per-port now that 587/465 are folded in.
         src_counts: dict = {}
-        for v in st_hosts.values():
-            src_counts[v.get("source")] = src_counts.get(v.get("source"), 0) + 1
-        mx_total = checks.get("starttls", {}).get("total", 0)
+        for label, v in st_hosts.items():
+            if ":" in label:
+                continue
+            det = v.get("determined_by") or v.get("source")
+            src_counts[det] = src_counts.get(det, 0) + 1
+        mx_total = st_res.get("mx_count", 0)
         services = {
             "shodan": {"available": self.shodan.available,
                        "used": src_counts.get("shodan", 0) > 0,
@@ -218,7 +270,14 @@ class ScanOrchestrator:
             "active_smtp": {"enabled": self.active_smtp,
                             "used": src_counts.get("active", 0) > 0,
                             "mx_covered": src_counts.get("active", 0),
-                            "mx_total": mx_total},
+                            "mx_total": mx_total,
+                            "egress25_blocked": st_res.get("egress25_blocked",
+                                                           False)},
+            "mxtoolbox": {"available": self.mxtoolbox.available,
+                          "mode": getattr(self.mxtoolbox, "mode", "off"),
+                          "used": src_counts.get("mxtoolbox", 0) > 0,
+                          "mx_covered": src_counts.get("mxtoolbox", 0),
+                          "mx_total": mx_total},
             "dnsdumpster": {"available": self.dnsdumpster.available,
                             "selectors": dd_count, "error": dd_error},
             "crtsh": {"available": self.crtsh.available,

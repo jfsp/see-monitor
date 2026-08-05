@@ -103,6 +103,8 @@ def _session(host: str, port: int, timeout: int, helo_name: str,
     """
     sock = None
     try:
+        logger.info("active-probe %s:%d connect (helo=%s, verify=%s)",
+                    host, port, helo_name, verify)
         sock = socket.create_connection((host, port), timeout=timeout)
         out["reachable"] = True
         banner = _recv_multiline(sock, timeout)
@@ -122,6 +124,8 @@ def _session(host: str, port: int, timeout: int, helo_name: str,
                 caps.append(line[4:].strip())
         out["ehlo_capabilities"] = caps[:32]
         out["starttls_advertised"] = b"STARTTLS" in ehlo.upper()
+        logger.debug("active-probe %s:%d EHLO caps=%s starttls_advertised=%s",
+                     host, port, caps[:8], out["starttls_advertised"])
         for cap in caps:
             if cap.upper().startswith("AUTH"):
                 out["auth_before_tls"] = True
@@ -129,6 +133,7 @@ def _session(host: str, port: int, timeout: int, helo_name: str,
                 break
         if not out["starttls_advertised"]:
             out["error"] = "STARTTLS not advertised"
+            logger.info("active-probe %s:%d STARTTLS not advertised", host, port)
             return "no_starttls"
 
         sock.sendall(b"STARTTLS\r\n")
@@ -142,6 +147,8 @@ def _session(host: str, port: int, timeout: int, helo_name: str,
         out["starttls_ok"] = True
         out["error"] = ""
         out["tls_version"] = tls.version() or ""
+        logger.info("active-probe %s:%d STARTTLS ok (%s)",
+                    host, port, out["tls_version"])
         cip = tls.cipher()
         if cip:
             out["cipher_suite"], _, out["cipher_bits"] = cip
@@ -165,12 +172,17 @@ def _session(host: str, port: int, timeout: int, helo_name: str,
         return "ok"
     except ssl.SSLCertVerificationError as exc:
         out["cert_verify_error"] = str(exc)
+        logger.info("active-probe %s:%d PKIX validation failed: %s",
+                    host, port, exc)
         return "cert"
     except ssl.SSLError as exc:
         out["error"] = f"TLS handshake failed: {exc}"
+        logger.info("active-probe %s:%d handshake failed: %s", host, port, exc)
         return "error"
     except (socket.timeout, ConnectionError, OSError) as exc:
         out["error"] = str(exc)
+        logger.info("active-probe %s:%d transport error (egress 25 blocked?): "
+                    "%s", host, port, exc)
         return "error"
     finally:
         if sock is not None:
@@ -181,7 +193,7 @@ def _session(host: str, port: int, timeout: int, helo_name: str,
 
 
 def probe_smtp_starttls(host: str, port: int = 25, timeout: int = 10,
-                        helo_name: str = "see-monitor.invalid",
+                        helo_name: str = "escbmail.eu",
                         verify_cert: bool = True) -> dict:
     """
     Returns:
@@ -215,4 +227,101 @@ def probe_smtp_starttls(host: str, port: int = 25, timeout: int = 10,
         # certificate; reconnect once, without verification, to retrieve it.
         out["pkix_valid"] = False
         _session(host, port, timeout, helo_name, False, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Submission / implicit-TLS probes (shared by smtp_tls_check for the folded
+# 587/465 SMTP-transport assessment and by client_tls_check for IMAP/POP).
+# These return a compact verdict; they do not perform PKIX validation or
+# certificate capture — that is the MX:25 probe's job (see probe_smtp_starttls).
+# ---------------------------------------------------------------------------
+
+def probe_submission_starttls(host: str, port: int = 587, timeout: int = 10,
+                              helo_name: str = "escbmail.eu") -> dict:
+    """EHLO -> STARTTLS -> handshake on an SMTP submission port (587/2525)."""
+    out = {"reachable": False, "starttls_ok": False, "tls_version": "",
+           "weak_tls": False, "error": ""}
+    sock = None
+    try:
+        logger.info("active-probe %s:%d submission connect (helo=%s)",
+                    host, port, helo_name)
+        sock = socket.create_connection((host, port), timeout=timeout)
+        out["reachable"] = True
+        banner = _recv_multiline(sock, timeout)
+        if not banner.startswith(b"220"):
+            out["error"] = f"Unexpected banner: {banner[:80]!r}"
+            return out
+        sock.sendall(f"EHLO {helo_name}\r\n".encode())
+        ehlo = _recv_multiline(sock, timeout)
+        if b"STARTTLS" not in ehlo.upper():
+            out["error"] = "STARTTLS not advertised on submission port"
+            logger.info("active-probe %s:%d submission: no STARTTLS", host, port)
+            return out
+        sock.sendall(b"STARTTLS\r\n")
+        resp = _recv_multiline(sock, timeout)
+        if not resp.startswith(b"220"):
+            out["error"] = f"STARTTLS refused: {resp[:80]!r}"
+            return out
+        ctx = _context(False)
+        tls = ctx.wrap_socket(sock, server_hostname=host)
+        sock = None
+        out["starttls_ok"] = True
+        out["tls_version"] = tls.version() or ""
+        out["weak_tls"] = out["tls_version"] in _WEAK_TLS
+        logger.info("active-probe %s:%d submission STARTTLS ok (%s)",
+                    host, port, out["tls_version"])
+        try:
+            tls.sendall(b"QUIT\r\n")
+        except OSError:
+            pass
+        tls.close()
+    except ssl.SSLError as exc:
+        out["error"] = f"TLS handshake failed: {exc}"
+        logger.info("active-probe %s:%d submission handshake failed: %s",
+                    host, port, exc)
+    except (socket.timeout, ConnectionError, OSError) as exc:
+        out["error"] = str(exc)
+        logger.info("active-probe %s:%d submission transport error: %s",
+                    host, port, exc)
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    return out
+
+
+def probe_implicit_tls(host: str, port: int, timeout: int = 10) -> dict:
+    """Immediate TLS handshake (implicit) on 465/993/995."""
+    out = {"reachable": False, "starttls_ok": False, "tls_version": "",
+           "weak_tls": False, "error": ""}
+    sock = None
+    try:
+        logger.info("active-probe %s:%d implicit-TLS connect", host, port)
+        sock = socket.create_connection((host, port), timeout=timeout)
+        out["reachable"] = True
+        tls = _context(False).wrap_socket(sock, server_hostname=host)
+        sock = None
+        out["starttls_ok"] = True
+        out["tls_version"] = tls.version() or ""
+        out["weak_tls"] = out["tls_version"] in _WEAK_TLS
+        logger.info("active-probe %s:%d implicit-TLS ok (%s)",
+                    host, port, out["tls_version"])
+        tls.close()
+    except ssl.SSLError as exc:
+        out["error"] = f"TLS handshake failed: {exc}"
+        logger.info("active-probe %s:%d implicit-TLS handshake failed: %s",
+                    host, port, exc)
+    except (socket.timeout, ConnectionError, OSError) as exc:
+        out["error"] = str(exc)
+        logger.info("active-probe %s:%d implicit-TLS transport error: %s",
+                    host, port, exc)
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
     return out

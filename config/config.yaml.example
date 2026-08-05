@@ -10,9 +10,21 @@ https_enabled: false      # true only behind a TLS-terminating reverse proxy
 # --- Scanning --------------------------------------------------------------
 scanning:
   timeout: 10             # per-connection timeout (seconds)
-  active_smtp: true       # allow active STARTTLS probing when passive data is
-                          # unavailable (Shodan/Censys). Set false for
-                          # fully-passive operation.
+  active_smtp: true       # perform live SMTP connections (STARTTLS on 25/587,
+                          # implicit TLS on 465). Set false for fully-passive
+                          # operation (Shodan/Censys/MXToolbox only).
+  helo_name: escbmail.eu  # HELO/EHLO name used by the active probe on ports
+                          # 25 and 587. Must be a name you are entitled to use.
+  smtp_tls_strategy: reconcile
+                          # how live and passive/remote evidence is combined:
+                          #   reconcile     run all sources; a positive STARTTLS
+                          #                 from any ACTIVE source wins; passive
+                          #                 fills gaps; disagreements flagged
+                          #   active_first  local active authoritative, others
+                          #                 only when it is inconclusive
+                          #   passive_first legacy: Shodan/Censys first
+                          #   active_only   ignore passive/remote sources
+                          #   passive_only  no live connections at all
   dkim_wordlist: true     # probe common DKIM selectors in addition to
                           # per-domain registered selectors
   nameservers: []         # e.g. ["8.8.8.8", "1.1.1.1"]; empty = system default
@@ -95,6 +107,23 @@ dnsdumpster:
 # re-confirmed authoritatively before scoring.
 securitytrails:
   api_key: ""
+
+# MXToolbox (optional) — REMOTE ACTIVE SMTP source. MXToolbox runs its SMTP/
+# STARTTLS diagnostic from its OWN network, so it can confirm a target's port-25
+# TLS posture even when THIS host cannot open port 25 outbound (a common cloud/
+# hosting restriction). That makes it the egress-independent complement to the
+# local active probe.
+#   NOTE: the SMTP lookup is a *network* lookup, which requires a PAID plan;
+#   the free tier covers DNS lookups only. Quota is therefore scarce.
+#   mode:
+#     fallback  (default) query MXToolbox only for MX hosts the local active
+#               probe could not determine — conserves network quota
+#     always    query MXToolbox for every MX host (uses one network lookup each)
+#     off       disabled
+mxtoolbox:
+  api_key: ""             # UUID from your MXToolbox account (paid for network)
+  mode: fallback
+  timeout: 20
 
 # --- Scoring overrides (optional) -----------------------------------------
 # Anything set here overrides guidelines/nist_800_177r1.json.

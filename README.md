@@ -18,8 +18,8 @@ codebase, but is a new tool with an email-security scope and a fresh database.
 | SPF      | RFC 7208 / SP 800-177r1 §4.4    | Record presence, `all` qualifier + ordering, `ptr`, ip-vs-name, deny-all, lookup limit (≤10), **void-lookup limit (≤2, §4.6.4)**, **dangling include/redirect targets**, **size of the authorised address space**, **shared/multi-tenant ESP includes**, **macro use** |
 | DKIM     | RFC 6376 / SP 800-177r1 §4.5    | Selectors (wordlist **+** passive **+** per-domain registered), key type/size, RSA≤2048, Ed25519 presence, SHA-1, testing flag, **evidence quality (`present` / `absent` / `unknown`)** |
 | DMARC    | RFC 7489 + DMARCbis / §4.6      | Policy, `pct`, `sp`, strict alignment, `rua`/`ruf`, **organizational-domain tree walk**, **`np=` and `psd=`**, **verified external-destination authorisation (§7.1)**, **`rua` destination reachability** |
-| STARTTLS | RFC 3207 / SP 800-177r1 §5.1    | Per-MX support (**three-state: ok / no_tls / unknown**), negotiated TLS version, **certificate validity, hostname match, expiry, chain completeness, key and signature strength**, **SMTP AUTH offered before STARTTLS**, **banner/version disclosure** |
-| CLIENT-TLS | RFC 6186 / CCN-CERT BP/02      | Submission/retrieval TLS (587/465/993/995) discovered via SRV (n/a if not advertised); **conventional endpoint names and Autodiscover/Autoconfig reported passively as attack surface** |
+| STARTTLS | RFC 3207 / SP 800-177r1 §5.1    | **SMTP transport TLS across 25/587/465 per MX** (three-state: ok / no_tls / unknown), negotiated TLS version, **certificate validity, hostname match, expiry, chain completeness, key and signature strength**, **SMTP AUTH offered before STARTTLS**, **banner/version disclosure**. Evidence reconciled across local active probe, passive (Shodan/Censys) and remote-active (MXToolbox); intent cross-checked against DANE/MTA-STS |
+| CLIENT-TLS | RFC 6186 / CCN-CERT BP/02      | **Mail-retrieval TLS (IMAPS 993 / POP3S 995)** discovered via SRV (n/a if not advertised); **conventional endpoint names and Autodiscover/Autoconfig reported passively as attack surface**. (SMTP submission 587/465 is assessed under STARTTLS as of 0.7.0.) |
 | DNSSEC   | RFC 4033-4035 / §4.1-4.2        | DS + DNSKEY, AD-flag validation, `_dmarc` policy-zone AD, **signing algorithm quality (RFC 8624)**, **SHA-1-only DS digest**, **NSEC3 iterations (RFC 9276)** |
 | DANE     | RFC 7672 / SP 800-177r1 §5.2    | TLSA per MX, usability (requires valid DNSSEC), **usage/selector/matching-type validation**, **live match against the presented certificate** |
 | MTA-STS  | RFC 8461                        | TXT record + HTTPS policy, mode, MX coverage, **`id=` presence, HTTP 200/no-redirect, content-type, `version: STSv1`, `max_age` bounds, policy-host certificate validity** |
@@ -31,10 +31,22 @@ codebase, but is a new tool with an email-security scope and a fresh database.
 
 ### Scanning strategy
 
-STARTTLS evidence is gathered **passive-first**: Shodan is consulted first,
-then Censys as an alternative (both via API). An active, non-intrusive SMTP
-STARTTLS probe (EHLO → STARTTLS → handshake → QUIT) is used as a fallback only
-when passive sources have no data and `scanning.active_smtp` is enabled.
+STARTTLS evidence is **reconciled across sources** (`scanning.smtp_tls_strategy`,
+default `reconcile`). For each MX host the scanner runs a non-intrusive active
+probe (EHLO → STARTTLS → handshake → QUIT) on ports 25 and 587, an implicit-TLS
+handshake on 465, and consults passive scans (Shodan/Censys) and — when a local
+port is unreachable — MXToolbox (a remote, egress-independent active source). A
+positive STARTTLS from **any active source** wins; a reachable local `no_tls`
+beats passive; passive fills gaps at lower confidence; otherwise the host is
+`unknown` (never scored as a failure). Source conflicts are flagged, and the
+verdict is cross-checked against declared intent (DANE TLSA / MTA-STS `enforce`).
+
+The active probe's HELO/EHLO name is `scanning.helo_name` (default
+`escbmail.eu`). If every local port-25 connection fails at the transport layer
+the scan reports `egress25_blocked` — this host cannot open port 25 outbound, so
+inbound verdicts rely on passive/remote sources; set an `mxtoolbox.api_key` for
+an egress-independent result. Set `scanning.active_smtp: false` (or
+`smtp_tls_strategy: passive_only`) for fully-passive operation.
 
 DKIM selectors are discovered from **SecurityTrails** and **DNSDumpster** when
 API keys are configured (see below), in addition to per-domain registered

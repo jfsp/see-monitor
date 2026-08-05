@@ -25,28 +25,27 @@ Copyright (C) 2026 SEE-Monitor Contributors
 AI-assisted development: portions generated with Claude (Anthropic)
 """
 
-import socket
-import ssl
 import logging
 from datetime import datetime, timezone
 
 from scanner.dns_client import DNSClient
-from scanner.starttls_probe import _recv_multiline, _WEAK_TLS
+from scanner.starttls_probe import probe_implicit_tls
 
 logger = logging.getLogger(__name__)
 
-# service -> (SRV name, default port, mode)   mode: "starttls" | "implicit"
-# Conventional client-endpoint names. Almost no domain publishes RFC 6186 SRV
-# records, so SRV-only discovery makes this control n/a nearly everywhere. The
-# presence of these names is DNS-observable and is reported as ATTACK SURFACE;
-# their TLS posture is not probed here (that needs connections to submission/
-# IMAP/POP ports — see README "Future features").
+# Mail RETRIEVAL TLS only (IMAP/POP). SMTP submission (587) and implicit-TLS
+# submission (465) moved into the STARTTLS "SMTP transport TLS" control in
+# v0.7.0, where they are probed on the MX hosts (SRV discovery yielded them
+# almost nowhere). This control therefore covers IMAPS/POP3S retrieval, which
+# only CCN-CERT BP/02 weights.
+#
+# service -> (SRV name, default port, mode)   mode: "implicit"
+# Conventional client-endpoint names are DNS-observable and reported as ATTACK
+# SURFACE; their TLS posture is verified only when SRV records advertise them.
 _CONVENTIONAL_NAMES = ["mail", "smtp", "imap", "pop", "pop3", "webmail",
                        "autodiscover", "autoconfig", "owa", "exchange"]
 
 _SRV_SERVICES = {
-    "submission":  ("_submission._tcp",  587, "starttls"),
-    "submissions": ("_submissions._tcp", 465, "implicit"),
     "imaps":       ("_imaps._tcp",       993, "implicit"),
     "pop3s":       ("_pop3s._tcp",       995, "implicit"),
 }
@@ -64,81 +63,6 @@ def _srv_targets(domain: str, srv_name: str, dc: DNSClient) -> list[tuple]:
         if host and host != ".":
             targets.append((host, port))
     return targets
-
-
-def _probe_implicit_tls(host: str, port: int, timeout: int) -> dict:
-    out = {"reachable": False, "tls_ok": False, "tls_version": "",
-           "weak_tls": False, "error": ""}
-    sock = None
-    try:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
-        sock = socket.create_connection((host, port), timeout=timeout)
-        out["reachable"] = True
-        tls = ctx.wrap_socket(sock, server_hostname=host)
-        out["tls_ok"] = True
-        out["tls_version"] = tls.version() or ""
-        out["weak_tls"] = out["tls_version"] in _WEAK_TLS
-        tls.close()
-        sock = None
-    except (socket.timeout, ConnectionError, OSError) as exc:
-        out["error"] = str(exc)
-    except ssl.SSLError as exc:
-        out["error"] = f"TLS handshake failed: {exc}"
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
-    return out
-
-
-def _probe_starttls_submission(host: str, port: int, timeout: int) -> dict:
-    """EHLO -> STARTTLS -> handshake on the submission port (587)."""
-    out = {"reachable": False, "tls_ok": False, "tls_version": "",
-           "weak_tls": False, "error": ""}
-    sock = None
-    try:
-        sock = socket.create_connection((host, port), timeout=timeout)
-        out["reachable"] = True
-        banner = _recv_multiline(sock, timeout)
-        if not banner.startswith(b"220"):
-            out["error"] = f"Unexpected banner: {banner[:80]!r}"
-            return out
-        sock.sendall(b"EHLO see-monitor.invalid\r\n")
-        ehlo = _recv_multiline(sock, timeout)
-        if b"STARTTLS" not in ehlo.upper():
-            out["error"] = "STARTTLS not advertised on submission port"
-            return out
-        sock.sendall(b"STARTTLS\r\n")
-        resp = _recv_multiline(sock, timeout)
-        if not resp.startswith(b"220"):
-            out["error"] = f"STARTTLS refused: {resp[:80]!r}"
-            return out
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
-        tls = ctx.wrap_socket(sock, server_hostname=host)
-        out["tls_ok"] = True
-        out["tls_version"] = tls.version() or ""
-        out["weak_tls"] = out["tls_version"] in _WEAK_TLS
-        tls.close()
-        sock = None
-    except (socket.timeout, ConnectionError, OSError) as exc:
-        out["error"] = str(exc)
-    except ssl.SSLError as exc:
-        out["error"] = f"TLS handshake failed: {exc}"
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
-    return out
 
 
 def check_client_tls(domain: str, dns_client: DNSClient | None = None,
@@ -181,8 +105,8 @@ def check_client_tls(domain: str, dns_client: DNSClient | None = None,
 
     if not discovered:
         out["issues"].append(
-            "No RFC 6186 SRV records (_submission/_imaps/_pop3s) — client "
-            "TLS posture not DNS-advertised (n/a)")
+            "No RFC 6186 SRV records (_imaps/_pop3s) — mail-retrieval TLS "
+            "posture not DNS-advertised (n/a)")
         if out["conventional_hosts"]:
             out["issues"].append(
                 "Client mail endpoints exist under conventional names ("
@@ -209,11 +133,10 @@ def check_client_tls(domain: str, dns_client: DNSClient | None = None,
                                      "tls_version": "", "weak_tls": False,
                                      "error": "active probing disabled"}
             continue
-        if mode == "starttls":
-            r = _probe_starttls_submission(host, port, timeout)
-        else:
-            r = _probe_implicit_tls(host, port, timeout)
-        r.update({"host": host, "port": port, "mode": mode})
+        pr = probe_implicit_tls(host, port, timeout)
+        r = {"reachable": pr["reachable"], "tls_ok": pr["starttls_ok"],
+             "tls_version": pr["tls_version"], "weak_tls": pr["weak_tls"],
+             "error": pr["error"], "host": host, "port": port, "mode": mode}
         out["services"][name] = r
         if r["tls_ok"]:
             out["tls_ok_count"] += 1

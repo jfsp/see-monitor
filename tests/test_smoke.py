@@ -2063,7 +2063,8 @@ def test_check_apis_registry_and_unconfigured_skip():
     """Every keyed service reports 'skip' (no network) when its key is absent."""
     m = _load_check_apis()
     assert set(m.CHECKS) == {
-        "shodan", "censys", "dnsdumpster", "securitytrails", "crtsh"}
+        "shodan", "censys", "dnsdumpster", "securitytrails", "crtsh",
+        "mxtoolbox"}
     empty = {}
     for svc in ("shodan", "censys", "dnsdumpster", "securitytrails"):
         res = m.CHECKS[svc](empty, 5, "example.com")
@@ -2222,3 +2223,137 @@ def _json_loads_last(text):
     import json as _json
     # The JSON blob is the stdout payload (verbose logs go to stderr).
     return _json.loads(text)
+
+
+# ---------------------------------------------------------------------------
+# 0.7.0 — SMTP transport TLS: reconcile strategy, 587/465 fold, egress-25,
+# MXToolbox remote-active fallback, DANE/MTA-STS intent reconciliation.
+# All probe/network calls are stubbed; nothing touches the wire.
+# ---------------------------------------------------------------------------
+
+import scanner.smtp_tls_check as _stls  # noqa: E402
+
+
+def _inbound(reachable=True, ok=False, advertised=None, error=""):
+    return {"reachable": reachable, "starttls_advertised": advertised,
+            "starttls_ok": ok, "tls_version": "TLSv1.3" if ok else "",
+            "cipher_suite": "", "cipher_bits": 0, "weak_tls": False,
+            "cert_subject": "", "cert_expired": None, "pkix_valid": None,
+            "cert_verify_error": "", "banner": "", "software": None,
+            "software_version": None, "version_disclosed": False,
+            "ehlo_capabilities": [], "auth_before_tls": False,
+            "auth_mechanisms": [], "_chain_der": [], "error": error,
+            "source": "active", "timestamp": "t"}
+
+
+def _patch(monkey_inbound=None, sub_ok=True, impl_ok=True):
+    captured = {}
+
+    def inbound(host, port, timeout, helo_name, verify_cert):
+        captured["helo"] = helo_name
+        return (monkey_inbound or _inbound(reachable=True, ok=True))
+
+    _stls.probe_smtp_starttls = inbound
+    _stls.probe_submission_starttls = (
+        lambda h, p, timeout, helo_name: {
+            "reachable": True, "starttls_ok": sub_ok,
+            "tls_version": "TLSv1.3", "weak_tls": False, "error": ""})
+    _stls.probe_implicit_tls = (
+        lambda h, p, timeout: {
+            "reachable": True, "starttls_ok": impl_ok,
+            "tls_version": "TLSv1.3", "weak_tls": False, "error": ""})
+    return captured
+
+
+class _Passive:
+    def __init__(self, source, starttls):
+        self.source = source
+        self._st = starttls
+        self.available = True
+
+    def host_smtp_info(self, host):
+        return {"source": self.source, "found": True, "ip": "1.2.3.4",
+                "ports": {25: {"starttls": self._st, "tls_version": "TLSv1.2",
+                               "cipher_suite": "X"}}, "error": ""}
+
+
+class _MXT:
+    def __init__(self, starttls=True, reachable=True, mode="fallback"):
+        self.available = True
+        self.mode = mode
+        self._st, self._reach = starttls, reachable
+
+    def smtp_info(self, host):
+        return {"source": "mxtoolbox", "found": True, "reachable": self._reach,
+                "starttls": self._st, "tls_version": "TLSv1.2",
+                "weak_tls": False, "error": ""}
+
+
+def test_starttls_active_positive_beats_stale_passive():
+    _patch(monkey_inbound=_inbound(reachable=True, ok=True))
+    r = _stls.check_starttls(["mx.example.it"], _Passive("shodan", False),
+                             None, active=True, timeout=5, verify_cert=False,
+                             strategy="reconcile")
+    v = r["hosts"]["mx.example.it"]
+    assert v["status"] == "ok"
+    assert v["determined_by"] == "active"
+    assert v["disagreement"] is True   # shodan said no_tls, active said ok
+
+
+def test_starttls_helo_threaded():
+    cap = _patch(monkey_inbound=_inbound(reachable=True, ok=True))
+    _stls.check_starttls(["mx.example.it"], None, None, active=True, timeout=5,
+                         verify_cert=False, helo_name="escbmail.eu",
+                         strategy="reconcile")
+    assert cap["helo"] == "escbmail.eu"
+
+
+def test_starttls_egress25_blocked_mxtoolbox_rescue():
+    # local :25 connection never establishes -> egress-25 signal; MXToolbox
+    # (remote active) confirms STARTTLS.
+    _patch(monkey_inbound=_inbound(reachable=False, error="timed out"))
+    r = _stls.check_starttls(["mx1.example.it", "mx2.example.it"], None, None,
+                             active=True, timeout=5, verify_cert=False,
+                             strategy="reconcile", mxtoolbox_client=_MXT(True))
+    assert r["egress25_blocked"] is True
+    assert r["hosts"]["mx1.example.it"]["status"] == "ok"
+    assert r["hosts"]["mx1.example.it"]["determined_by"] == "mxtoolbox"
+
+
+def test_starttls_passive_fallback_when_active_unreachable():
+    _patch(monkey_inbound=_inbound(reachable=False, error="timed out"))
+    r = _stls.check_starttls(["mx.example.it"], _Passive("shodan", True), None,
+                             active=True, timeout=5, verify_cert=False,
+                             strategy="reconcile")
+    v = r["hosts"]["mx.example.it"]
+    assert v["status"] == "ok"
+    assert v["determined_by"] == "shodan"
+
+
+def test_starttls_folds_587_465_but_all_starttls_is_inbound_only():
+    # inbound ok, but submission 587 has no STARTTLS -> score blends it in,
+    # yet the "all MX offer STARTTLS" requirement stays true (25-only).
+    _patch(monkey_inbound=_inbound(reachable=True, ok=True), sub_ok=False)
+    r = _stls.check_starttls(["mx.example.it"], None, None, active=True,
+                             timeout=5, verify_cert=False, strategy="reconcile")
+    assert set(r["by_port"]) == {25, 465, 587}
+    assert r["by_port"][587]["no_tls"] == 1
+    assert r["no_tls_count"] == 1          # 587 folded into the blended tally
+    assert r["all_starttls"] is True       # inbound (:25) only
+
+
+def test_starttls_intent_mismatch_on_mta_sts_enforce():
+    try:
+        from scanner.orchestrator import _reconcile_tls_intent
+    except ImportError:
+        import pytest
+        pytest.skip("dnspython not installed")
+    _patch(monkey_inbound=_inbound(reachable=True, advertised=False,
+                                   error="STARTTLS not advertised"))
+    r = _stls.check_starttls(["mx.example.it"], None, None, active=True,
+                             timeout=5, verify_cert=False, strategy="reconcile")
+    checks = {"starttls": r, "dane": {"usable": False},
+              "mta_sts": {"mode": "enforce"}}
+    _reconcile_tls_intent(checks)
+    assert r.get("intent_mismatch") is True
+    assert any("mandates TLS" in i for i in r["issues"])

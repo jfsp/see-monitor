@@ -219,18 +219,30 @@ def _render_scan(scan: dict, a: dict, verbose: bool,
         rec("MTA-STS", f"mode={sts.get('mode')} fetched={sts.get('policy_fetched')}")
 
     st = checks.get("starttls", {})
+    _stat = {"ok": "ok", "no_tls": "no", "unknown": "unknown"}
+    if st.get("egress25_blocked"):
+        rec("STARTTLS", click.style(
+            "outbound port 25 appears BLOCKED on this host — inbound verdicts "
+            "rely on passive/remote sources", fg="yellow"))
     for host, v in (st.get("hosts", {}) or {}).items():
         flag = click.style(" WEAK-TLS", fg="red") if v.get("weak_tls") else ""
-        rec("STARTTLS", f"{host}: {'ok' if v.get('starttls_ok') else 'no'} "
-            f"{v.get('tls_version') or ''} via {v.get('source')}{flag}")
+        status = _stat.get(v.get("status"), v.get("status") or "?")
+        src = v.get("determined_by") or v.get("source")
+        dis = click.style(" (disagree)", fg="yellow") \
+            if v.get("disagreement") else ""
+        err = ""
+        if v.get("status") == "unknown" and v.get("error"):
+            err = click.style(f"  [{v['error'][:60]}]", fg="bright_black")
+        rec("STARTTLS", f"{host}: {status} "
+            f"{v.get('tls_version') or ''} via {src}{flag}{dis}{err}")
 
     intel = (checks.get("intel", {}) or {}).get("securitytrails", {})
     if intel.get("mail_hosts"):
         rec("ST mail", ", ".join(intel["mail_hosts"][:8]))
 
     # per-service diagnostics with errors
-    for name in ("shodan", "censys", "active_smtp", "dnsdumpster",
-                 "securitytrails"):
+    for name in ("shodan", "censys", "active_smtp", "mxtoolbox",
+                 "dnsdumpster", "securitytrails"):
         s = svc.get(name, {})
         if s.get("error"):
             rec(name, click.style(f"error: {s['error']}", fg="red"))
@@ -266,8 +278,18 @@ def _render_sources(svc: dict, indent: str) -> str:
                          f"{s.get('mx_total', 0)} MX")
     act = svc.get("active_smtp", {})
     if act.get("used"):
+        note = ""
+        if act.get("egress25_blocked"):
+            note = click.style("  (egress 25 blocked)", fg="yellow")
         parts.append(f"active SMTP: {act.get('mx_covered', 0)}/"
-                     f"{act.get('mx_total', 0)} MX")
+                     f"{act.get('mx_total', 0)} MX{note}")
+    mxt = svc.get("mxtoolbox", {})
+    if mxt.get("used"):
+        parts.append(f"MXToolbox: STARTTLS {mxt.get('mx_covered', 0)}/"
+                     f"{mxt.get('mx_total', 0)} MX (remote active)")
+    elif mxt.get("available"):
+        parts.append(click.style(
+            f"MXToolbox: available (mode={mxt.get('mode')})", fg="bright_black"))
     if not parts:
         return click.style("none configured (DNS + wordlist only)",
                            fg="bright_black")

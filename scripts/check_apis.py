@@ -259,12 +259,36 @@ def check_crtsh(cfg, timeout, domain):
               "gracefully and does not affect scoring or the keyed sources")
 
 
+def check_mxtoolbox(cfg, timeout, domain):
+    """Confirm auth + report NETWORK quota (the SMTP lookup is a network call).
+
+    Uses the quota-free /Usage endpoint — it does NOT consume a network lookup
+    and does NOT run a live SMTP test, so it is safe to call repeatedly.
+    """
+    from scanner.mxtoolbox_client import MXToolboxClient   # local import
+    mcfg = cfg.get("mxtoolbox") or {}
+    client = MXToolboxClient(mcfg.get("api_key"),
+                             mode=mcfg.get("mode", "fallback"), timeout=timeout)
+    if not (mcfg.get("api_key") or "").strip():
+        return _r("mxtoolbox", SKIP, "no api_key in config")
+    u = client.usage()
+    if not u.get("ok"):
+        return _r("mxtoolbox", FAIL, u.get("error", "usage query failed"))
+    nu, nm = u.get("network_used"), u.get("network_max")
+    detail = f"network lookups {nu}/{nm}" if nm is not None else "auth ok"
+    note = "quota-free (/Usage)"
+    if nm is not None and nm == 0:
+        note = "NO network quota — SMTP lookups need a paid plan"
+    return _r("mxtoolbox", OK, detail, note)
+
+
 CHECKS = {
     "shodan": check_shodan,
     "censys": check_censys,
     "dnsdumpster": check_dnsdumpster,
     "securitytrails": check_securitytrails,
     "crtsh": check_crtsh,
+    "mxtoolbox": check_mxtoolbox,
 }
 
 
