@@ -2357,3 +2357,18 @@ def test_starttls_intent_mismatch_on_mta_sts_enforce():
     _reconcile_tls_intent(checks)
     assert r.get("intent_mismatch") is True
     assert any("mandates TLS" in i for i in r["issues"])
+
+
+def test_egress25_warns_once_per_process(caplog):
+    import logging as _logging
+    _stls._EGRESS_WARNED = False              # reset the per-process guard
+    _patch(monkey_inbound=_inbound(reachable=False, error="timed out"),
+           sub_ok=False, impl_ok=False)
+    with caplog.at_level(_logging.WARNING, logger="scanner.smtp_tls_check"):
+        _stls.check_starttls(["a.example.it"], None, None, active=True,
+                             timeout=3, verify_cert=False)
+        _stls.check_starttls(["b.example.it"], None, None, active=True,
+                             timeout=3, verify_cert=False)
+    warns = [r for r in caplog.records if r.levelno == _logging.WARNING
+             and "port 25" in r.getMessage()]
+    assert len(warns) == 1                    # once per process, not per domain

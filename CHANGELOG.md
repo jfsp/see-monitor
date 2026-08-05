@@ -37,10 +37,14 @@ Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
   MTA-STS is `mode=enforce` but STARTTLS is not confirmed on an inbound host,
   an `intent_mismatch` finding is raised — declared policy and observed
   transport disagree. No new connections are made.
-- **Egress-25 detection.** If active probing is enabled but every local port-25
-  connection fails at the transport layer, the scan sets `egress25_blocked` and
-  explains that inbound verdicts rely on passive/remote sources — the exact
-  cause of "active SMTP N/N MX → unknown" on port-25-filtered hosts.
+- **Egress-25 detection and alerting.** If active probing is enabled but every
+  local port-25 connection fails at the transport layer, the scan sets
+  `egress25_blocked`, logs a single **WARNING** per process (visible in normal
+  logs without `-v`), and the CLI prints a prominent end-of-run banner naming
+  the affected domains (also surfaced in `--json` as
+  `egress25_blocked_domains`). This is the exact cause of "active SMTP N/N MX →
+  unknown" on port-25-filtered hosts (e.g. GCP, where the block is permanent
+  and enforced above the VPC firewall).
 - **Configurable HELO/EHLO name** (`scanning.helo_name`, default `escbmail.eu`),
   threaded into the active probe on ports 25 and 587 (previously hardcoded to
   `see-monitor.invalid` and, in fact, dropped before reaching the probe).

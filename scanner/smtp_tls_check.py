@@ -63,6 +63,22 @@ _INBOUND_PORT = 25
 _SUBMISSION_PORTS = (587,)
 _IMPLICIT_PORTS = (465,)
 
+# Egress-25 is a HOST condition, not a per-domain one: warn once per process so
+# a community-wide scan does not emit the same WARNING hundreds of times.
+_EGRESS_WARNED = False
+
+
+def _warn_egress_once():
+    global _EGRESS_WARNED
+    if not _EGRESS_WARNED:
+        logger.warning(
+            "Outbound TCP port 25 appears BLOCKED on this host — every local "
+            "SMTP connection failed at the transport layer. Inbound STARTTLS "
+            "verdicts will rely on passive (Shodan/Censys) and, if configured, "
+            "remote-active (MXToolbox) sources. On GCP this block is permanent "
+            "and cannot be lifted; see HANDOVER for egress-independent options.")
+        _EGRESS_WARNED = True
+
 
 def _blank_verdict(source: str, error: str, port: int, role: str) -> dict:
     return {"source": source, "status": "unknown", "reachable": False,
@@ -405,6 +421,7 @@ def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
     if active_enabled and active_attempts > 0 \
             and active_transport_fail == active_attempts:
         out["egress25_blocked"] = True
+        _warn_egress_once()
         out["issues"].append(
             "Every local port-25 connection failed at the transport layer — "
             "this is almost certainly outbound port 25 blocked on the "

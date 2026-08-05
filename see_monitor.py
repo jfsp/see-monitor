@@ -400,9 +400,13 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
 
     run_id = db.create_run(targets, trigger="cli")
     results = []
+    egress25_domains = []
     for d in targets:
         scan_res = orch.scan_domain(d)
         db.save_scan_result(run_id, scan_res)
+        if (scan_res.get("checks", {}).get("starttls", {})
+                .get("egress25_blocked")):
+            egress25_domains.append(d)
         assessments = assess_all_profiles(scan_res, cfg, gids)
         for gid, a in assessments.items():
             db.save_assessment(run_id, a)
@@ -423,8 +427,25 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
                                     profiles=others or None))
             click.echo()
     db.finish_run(run_id)
+    if egress25_domains and not as_json and not quiet:
+        click.echo(click.style(
+            "⚠ Outbound port 25 is BLOCKED on this host", fg="yellow",
+            bold=True))
+        click.echo(click.style(
+            f"  Local STARTTLS probing failed at the transport layer on "
+            f"{len(egress25_domains)} domain(s); inbound (:25) verdicts fell "
+            "back to passive/remote sources or were left 'unknown'.",
+            fg="yellow"))
+        click.echo(click.style(
+            "  This is a host/provider restriction (permanent on GCP). For an "
+            "egress-independent result configure MXToolbox (paid) or a passive "
+            "source, or run SEE-Monitor where port 25 egress is permitted.",
+            fg="bright_black"))
+        click.echo()
     if as_json:
         payload = {"results": results}
+        if egress25_domains:
+            payload["egress25_blocked_domains"] = egress25_domains
         if not force and skipped_no_mx:
             payload["skipped_no_mx"] = skipped_no_mx
         click.echo(json.dumps(payload, indent=2))
