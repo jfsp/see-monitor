@@ -48,6 +48,16 @@ inbound verdicts rely on passive/remote sources; set an `mxtoolbox.api_key` for
 an egress-independent result. Set `scanning.active_smtp: false` (or
 `smtp_tls_strategy: passive_only`) for fully-passive operation.
 
+**Egress-independent remote sources.** For hosts that cannot open port 25
+outbound (permanent on GCP, common on AWS/Azure), three remote sources test
+STARTTLS from their own networks and feed the same reconciliation: **MXToolbox**
+(paid, per-MX), **ssl-tools.net** (free, per-MX, synchronous — auto-refreshes
+cached reports older than `ssltools.freshness_days`), and **internet.nl** (free,
+domain-level, government-backed). internet.nl's API is an asynchronous batch, so
+it is refreshed on a schedule and cached (`internetnl.cache_ttl_days`); a scan
+reads the cached verdict rather than calling it inline (`internetnl-refresh`
+seeds/forces it). All are optional and off until configured.
+
 DKIM selectors are discovered from **SecurityTrails** and **DNSDumpster** when
 API keys are configured (see below), in addition to per-domain registered
 selectors and the common-selector wordlist. Subdomain candidates come from

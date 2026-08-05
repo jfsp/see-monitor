@@ -4,6 +4,61 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.8.0] — 2026-08-06
+
+### Added
+- **Two egress-independent remote-active STARTTLS sources.** When this host
+  cannot open port 25 outbound (permanent on GCP, common on AWS/Azure), the
+  local probe alone cannot confirm STARTTLS. Two sources that test from their
+  own networks now fill that gap and feed the reconciler:
+  - **ssl-tools.net** (`scanner/ssltools_client.py`) — free, no account,
+    **per-MX**, synchronous. Reads `/mailservers/<domain>?format=json`, and
+    because ssl-tools caches reports (a domain's report can be years old),
+    auto-triggers `/refresh` when the report is older than
+    `ssltools.freshness_days` (default 7) and re-polls. Stale data that cannot
+    be refreshed is flagged and **not used for scoring**. Disabled by default.
+  - **internet.nl** (`scanner/internetnl_client.py`) — free, government-backed
+    (Dutch Internet Standards Platform), **domain-level**, batch API v2. Because
+    the API is asynchronous (submit → poll → results, minutes per batch), it is
+    consumed as a **scheduled batch that caches per-domain verdicts**
+    (`scheduler/internetnl_batch.py`, weekly), which the scanner reads at scan
+    time within `internetnl.cache_ttl_days` (default 7). Requires an approved
+    account (non-profit / NIS2 high-criticality organisations qualify).
+    Trigger a refresh manually with `see_monitor.py internetnl-refresh`.
+- **N-source reconciliation.** The STARTTLS reconciler was generalised from a
+  fixed local/passive/MXToolbox set to any number of remote-active sources.
+  Precedence unchanged in spirit: a positive STARTTLS from **any active source**
+  (local probe, MXToolbox, ssl-tools, internet.nl) wins; the local probe still
+  takes priority among active sources; passive (Shodan/Censys) fills gaps;
+  conflicts are flagged.
+- **`internetnl_results` cache table (schema v5)** with `upsert`/`get`
+  accessors; a weekly scheduler job; and the `internetnl-refresh` CLI command.
+- **Connectivity checks** for both sources in `scripts/check_apis.py`
+  (`ssltools`, `internetnl`). The `ssltools` check dumps the parsed JSON shape
+  and raw keys so the (undocumented) field mapping can be confirmed live.
+
+### Changed
+- **`scan -v` Sources panel** now reports ssl-tools and internet.nl usage
+  alongside Shodan/Censys/MXToolbox/active-SMTP.
+
+### Notes / caveats
+- **ssl-tools JSON schema is unverified upstream** (their robots policy blocks
+  automated fetching from the build sandbox; robots.txt targets crawlers per
+  RFC 9309, not single documented API lookups). The parser is tolerant of
+  several key-name shapes and fails safe to `unknown`. Confirm the mapping with
+  `scripts/check_apis.py ssltools -v <domain>` and tighten if needed.
+- **internet.nl results envelope** (the exact `results.tests` shape) was not
+  verifiable without an account; the mapper is defensive. Confirm once the
+  account is approved.
+- BinaryEdge was **shut down (Mar 2025)** and Onyphe requires a **corporate
+  account**, so neither is a viable Tier-2 passive source. MXToolbox's free
+  tier has **0 network lookups/day**, so its SMTP test needs a paid plan.
+
+### Migration
+- Schema auto-migrates to v5 (additive table, no data change). Both new sources
+  are off until configured. After enabling, run `scripts/reassess_all.py` /
+  `scan --rescan-all` as usual to reflect new evidence.
+
 ## [0.7.0] — 2026-08-06
 
 ### Added

@@ -30,6 +30,8 @@ from scanner.censys_client import CensysClient
 from scanner.dnsdumpster_client import DNSDumpsterClient
 from scanner.securitytrails_client import SecurityTrailsClient
 from scanner.mxtoolbox_client import MXToolboxClient
+from scanner.ssltools_client import SSLToolsClient
+from scanner.internetnl_client import InternetNLClient
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,19 @@ class ScanOrchestrator:
             mxt_cfg.get("api_key"),
             mode=mxt_cfg.get("mode", "fallback"),
             timeout=int(mxt_cfg.get("timeout", 20)))
+        st_cfg = cfg.get("ssltools") or {}
+        self.ssltools = SSLToolsClient(
+            enabled=bool(st_cfg.get("enabled", False)),
+            mode=st_cfg.get("mode", "fallback"),
+            freshness_days=int(st_cfg.get("freshness_days", 7)),
+            timeout=int(st_cfg.get("timeout", 20)))
+        inl_cfg = cfg.get("internetnl") or {}
+        self.internetnl = InternetNLClient(
+            inl_cfg.get("username"), inl_cfg.get("password"),
+            base_url=inl_cfg.get("base_url",
+                                 "https://batch.internet.nl/api/batch/v2"),
+            timeout=int(inl_cfg.get("timeout", 30)))
+        self.internetnl_ttl_days = int(inl_cfg.get("cache_ttl_days", 7))
 
         # ---- v0.6.0 options ------------------------------------------
         self.verify_mx_certs = bool(scan_cfg.get("verify_mx_certs", True))
@@ -121,6 +136,31 @@ class ScanOrchestrator:
         domain = domain.strip().lower().rstrip(".")
         mx = resolve_mx(domain, self.dns)
         return mx["has_mx"] and not mx["null_mx"]
+
+    def _internetnl_cached(self, domain: str):
+        """Return the cached internet.nl verdict for *domain* if fresh, else None.
+
+        Freshness = within internetnl_ttl_days of checked_at. Stale/absent
+        entries return None so the reconciler simply omits the vote.
+        """
+        if self.db is None or not self.internetnl.available:
+            return None
+        try:
+            row = self.db.get_internetnl_result(domain)
+        except Exception:                              # noqa: BLE001
+            return None
+        if not row or not row.get("checked_at"):
+            return None
+        try:
+            ts = datetime.fromisoformat(row["checked_at"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        age_days = (datetime.now(timezone.utc) - ts).total_seconds() / 86400.0
+        if age_days > self.internetnl_ttl_days:
+            return None
+        return row
 
     def scan_domain(self, domain: str,
                     registered_selectors: list[str] | None = None) -> dict:
@@ -190,7 +230,8 @@ class ScanOrchestrator:
         checks["starttls"] = self._safe(
             check_starttls, mx_hosts, self.shodan, self.censys,
             self.active_smtp, self.timeout, self.verify_mx_certs,
-            self.helo_name, self.smtp_tls_strategy, self.mxtoolbox)
+            self.helo_name, self.smtp_tls_strategy, self.mxtoolbox,
+            domain, self.ssltools, self._internetnl_cached(domain))
         chains = checks["starttls"].pop("_chains", {}) or {}
 
         checks["dane"] = self._safe(
@@ -278,6 +319,15 @@ class ScanOrchestrator:
                           "used": src_counts.get("mxtoolbox", 0) > 0,
                           "mx_covered": src_counts.get("mxtoolbox", 0),
                           "mx_total": mx_total},
+            "ssltools": {"available": self.ssltools.available,
+                         "mode": getattr(self.ssltools, "mode", "off"),
+                         "used": src_counts.get("ssltools", 0) > 0,
+                         "mx_covered": src_counts.get("ssltools", 0),
+                         "mx_total": mx_total},
+            "internetnl": {"available": self.internetnl.available,
+                           "used": src_counts.get("internetnl", 0) > 0,
+                           "mx_covered": src_counts.get("internetnl", 0),
+                           "mx_total": mx_total},
             "dnsdumpster": {"available": self.dnsdumpster.available,
                             "selectors": dd_count, "error": dd_error},
             "crtsh": {"available": self.crtsh.available,

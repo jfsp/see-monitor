@@ -282,6 +282,53 @@ def check_mxtoolbox(cfg, timeout, domain):
     return _r("mxtoolbox", OK, detail, note)
 
 
+def check_ssltools(cfg, timeout, domain):
+    """Fetch one domain's JSON and report what the parser extracted.
+
+    Verifies connectivity and (importantly) the undocumented JSON schema, so
+    the field mapping can be confirmed live. Uses the configured freshness.
+    """
+    from scanner.ssltools_client import SSLToolsClient   # local import
+    scfg = cfg.get("ssltools") or {}
+    if not bool(scfg.get("enabled", False)):
+        return _r("ssltools", SKIP, "disabled in config (ssltools.enabled)")
+    client = SSLToolsClient(enabled=True, mode=scfg.get("mode", "fallback"),
+                            freshness_days=int(scfg.get("freshness_days", 7)),
+                            timeout=timeout)
+    info = client.mailserver_info(domain)
+    if info.get("error") and not info.get("servers"):
+        return _r("ssltools", FAIL, info["error"])
+    n = len(info.get("servers", {}))
+    detail = (f"{n} server row(s), report age "
+              f"{info.get('report_age_days')}d, keys={info.get('raw_keys')}")
+    note = "verify JSON field mapping against this output" if n == 0 \
+        else "stale (refresh failed)" if info.get("stale") else "quota-free"
+    return _r("ssltools", OK if n else FAIL, detail, note)
+
+
+def check_internetnl(cfg, timeout, domain):
+    """Confirm internet.nl Basic-auth credentials without spending a batch."""
+    from scanner.internetnl_client import InternetNLClient   # local import
+    icfg = cfg.get("internetnl") or {}
+    client = InternetNLClient(icfg.get("username"), icfg.get("password"),
+                              base_url=icfg.get(
+                                  "base_url",
+                                  "https://batch.internet.nl/api/batch/v2"),
+                              timeout=timeout)
+    if not client.available:
+        return _r("internetnl", SKIP, "no username/password in config")
+    try:
+        resp = _get("internetnl/requests", f"{client.base_url}/requests",
+                    timeout, auth=(client.username, client.password))
+        if resp.status_code in (401, 403):
+            return _r("internetnl", FAIL, "authentication failed (401/403)")
+        resp.raise_for_status()
+        return _r("internetnl", OK, "auth ok (GET /requests)",
+                  "batch cadence via scheduler; internetnl-refresh to seed")
+    except Exception as exc:                           # noqa: BLE001
+        return _r("internetnl", FAIL, _err(exc))
+
+
 CHECKS = {
     "shodan": check_shodan,
     "censys": check_censys,
@@ -289,6 +336,8 @@ CHECKS = {
     "securitytrails": check_securitytrails,
     "crtsh": check_crtsh,
     "mxtoolbox": check_mxtoolbox,
+    "ssltools": check_ssltools,
+    "internetnl": check_internetnl,
 }
 
 

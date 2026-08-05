@@ -170,79 +170,90 @@ def _mxt_status(v: dict) -> str:
     return "unknown"
 
 
-def _reconcile_inbound(mx, active_v, passive_v, mxt_v, strategy):
-    """Combine votes for MX:25 into a single verdict per the strategy."""
+def _reconcile_inbound(mx, active_v, remote_votes, passive_v, strategy):
+    """
+    Combine votes for MX:25 into one verdict.
+
+    active_v      local active probe verdict (richest; carries cert/EHLO) or None
+    remote_votes  list of remote-active votes (mxtoolbox/ssltools/internetnl),
+                  each {"source","status","tls_version","weak_tls"}
+    passive_v     first Shodan/Censys verdict or None
+    """
+    # Unified vote list. Local + remote testers are the "active" tier (they all
+    # actually connect on 25); Shodan/Censys are "passive". Lower prio wins ties.
     votes = []
     if active_v is not None:
-        votes.append(("active", active_v["status"]))
+        votes.append({"source": "active", "tier": "active",
+                      "status": active_v["status"], "prio": 0, "v": active_v})
+    for i, rv in enumerate(remote_votes or []):
+        votes.append({"source": rv["source"], "tier": "active",
+                      "status": rv.get("status", "unknown"),
+                      "prio": 5 + i, "v": rv})
     if passive_v is not None:
-        votes.append((passive_v["source"], passive_v["status"]))
-    if mxt_v is not None:
-        votes.append(("mxtoolbox", _mxt_status(mxt_v)))
+        votes.append({"source": passive_v["source"], "tier": "passive",
+                      "status": passive_v["status"], "prio": 20, "v": passive_v})
 
-    # Choose the base (richest) verdict object to carry cert/EHLO detail.
-    base = active_v or passive_v or _blank_verdict(
-        "none", "no evidence", _INBOUND_PORT, "inbound")
+    active_votes = sorted((x for x in votes if x["tier"] == "active"),
+                          key=lambda x: x["prio"])
+    passive_votes = [x for x in votes if x["tier"] == "passive"]
+
+    def _pick(seq, want):
+        for x in seq:
+            if x["status"] == want:
+                return x
+        return None
+
+    def _first_definite(seq):
+        for x in seq:
+            if x["status"] in ("ok", "no_tls"):
+                return x
+        return None
 
     def _decide():
-        a = active_v["status"] if active_v else None
-        p = passive_v["status"] if passive_v else None
-        m = _mxt_status(mxt_v) if mxt_v else None
         if strategy == "active_only":
-            return a or "unknown", "active"
+            return (_first_definite(active_votes)
+                    or {"status": "unknown", "source": "none"})
         if strategy == "passive_only":
-            return p or "unknown", (passive_v["source"] if passive_v else "none")
+            return (_first_definite(passive_votes)
+                    or {"status": "unknown", "source": "none"})
         if strategy == "passive_first":
-            if p:
-                return p, (passive_v["source"])
-            if a and a != "unknown":
-                return a, "active"
-            if m and m != "unknown":
-                return m, "mxtoolbox"
-            return "unknown", "none"
+            return (_first_definite(passive_votes)
+                    or _first_definite(active_votes)
+                    or {"status": "unknown", "source": "none"})
         if strategy == "active_first":
-            if a and a != "unknown":
-                return a, "active"
-            if m and m != "unknown":
-                return m, "mxtoolbox"
-            if p:
-                return p, (passive_v["source"])
-            return "unknown", "none"
-        # default: reconcile — positive active wins, then negatives, then passive
-        if a == "ok":
-            return "ok", "active"
-        if m == "ok":
-            return "ok", "mxtoolbox"
-        if a == "no_tls":
-            return "no_tls", "active"
-        if m == "no_tls":
-            return "no_tls", "mxtoolbox"
-        if p:
-            return p, (passive_v["source"])
-        return "unknown", "none"
+            return (_first_definite(active_votes)
+                    or _first_definite(passive_votes)
+                    or {"status": "unknown", "source": "none"})
+        # default reconcile: a positive active observation wins (hard to fake),
+        # then any active negative, then passive.
+        return (_pick(active_votes, "ok")
+                or _pick(active_votes, "no_tls")
+                or _first_definite(passive_votes)
+                or {"status": "unknown", "source": "none"})
 
-    status, determined_by = _decide()
-    # disagreement: two sources that both reached a definitive, conflicting call
-    definite = {s: st for s, st in votes if st in ("ok", "no_tls")}
+    win = _decide()
+    status = win["status"]
+    determined_by = win["source"]
+
+    definite = {x["source"]: x["status"] for x in votes
+                if x["status"] in ("ok", "no_tls")}
     disagreement = len(set(definite.values())) > 1
 
+    base = active_v or (win.get("v") if isinstance(win.get("v"), dict) else None) \
+        or _blank_verdict("none", "no evidence", _INBOUND_PORT, "inbound")
     out = dict(base)
     out["status"] = status
     out["determined_by"] = determined_by
-    out["sources"] = [{"source": s, "status": st} for s, st in votes]
+    out["sources"] = [{"source": x["source"], "status": x["status"]}
+                      for x in votes]
     out["disagreement"] = disagreement
-    # keep starttls_ok/tls_version consistent with the winning source
-    if determined_by == "mxtoolbox" and mxt_v is not None:
+    # If a non-local source decided the verdict, reflect its TLS details.
+    if determined_by not in ("active", "none") and isinstance(win.get("v"), dict):
+        wv = win["v"]
         out["starttls_ok"] = (status == "ok")
-        out["tls_version"] = mxt_v.get("tls_version", out.get("tls_version", ""))
-        out["weak_tls"] = mxt_v.get("weak_tls", out.get("weak_tls", False))
-        out["source"] = "mxtoolbox"
-    elif determined_by not in ("active",) and passive_v is not None \
-            and determined_by == passive_v["source"]:
-        out["starttls_ok"] = (status == "ok")
-        out["tls_version"] = passive_v.get("tls_version", "")
-        out["weak_tls"] = passive_v.get("weak_tls", False)
-        out["source"] = passive_v["source"]
+        out["tls_version"] = wv.get("tls_version", "") or out.get("tls_version", "")
+        out["weak_tls"] = wv.get("weak_tls", out.get("weak_tls", False))
+        out["source"] = determined_by
     return out
 
 
@@ -288,7 +299,8 @@ def _implicit_entry(mx, port, timeout, passive_clients):
 def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
                    active=True, timeout=10, verify_cert=True,
                    helo_name="escbmail.eu", strategy="reconcile",
-                   mxtoolbox_client=None,
+                   mxtoolbox_client=None, domain=None,
+                   ssltools_client=None, internetnl_result=None,
                    submission_ports=_SUBMISSION_PORTS,
                    implicit_ports=_IMPLICIT_PORTS) -> dict:
     """
@@ -327,6 +339,61 @@ def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
                    and strategy not in ("passive_only",))
     mxt_mode = getattr(mxtoolbox_client, "mode", "off") if mxt_enabled else "off"
 
+    # ssl-tools is per-DOMAIN: fetch once, then match MX hosts to its rows.
+    ssltools_enabled = (ssltools_client is not None
+                        and getattr(ssltools_client, "available", False)
+                        and strategy not in ("passive_only",) and domain)
+    ssltools_mode = getattr(ssltools_client, "mode", "off") \
+        if ssltools_enabled else "off"
+    ssltools_info = None
+    if ssltools_enabled:
+        try:
+            ssltools_info = ssltools_client.mailserver_info(domain)
+            if ssltools_info.get("stale"):
+                out["issues"].append(
+                    "ssl-tools report is stale and could not be refreshed — "
+                    "not used for scoring")
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("ssltools lookup failed for %s: %s", domain, exc)
+
+    # internet.nl is per-DOMAIN and precomputed (scheduled batch cache). The
+    # caller passes the cached verdict (freshness already applied) or None.
+    inl_status = None
+    if internetnl_result and strategy not in ("passive_only",):
+        inl_status = internetnl_result.get("starttls")   # "ok"|"no_tls"|None
+
+    def _remote_votes(mx, local_unknown):
+        votes = []
+        # MXToolbox (per-host)
+        if mxt_enabled and (mxt_mode == "always"
+                            or (mxt_mode == "fallback" and local_unknown)):
+            try:
+                mv = mxtoolbox_client.smtp_info(mx)
+                votes.append({"source": "mxtoolbox", "status": _mxt_status(mv),
+                              "tls_version": mv.get("tls_version", ""),
+                              "weak_tls": mv.get("weak_tls", False)})
+            except Exception as exc:                   # noqa: BLE001
+                logger.warning("MXToolbox lookup failed for %s: %s", mx, exc)
+        # ssl-tools (per-host, from the single per-domain fetch)
+        if ssltools_info and not ssltools_info.get("stale") \
+                and (ssltools_mode == "always"
+                     or (ssltools_mode == "fallback" and local_unknown)):
+            srv = (ssltools_info.get("servers") or {}).get(mx.rstrip(".").lower())
+            if srv is not None:
+                st = srv.get("starttls")
+                votes.append({"source": "ssltools",
+                              "status": "ok" if st is True
+                              else "no_tls" if st is False else "unknown",
+                              "tls_version": srv.get("tls_version", ""),
+                              "weak_tls": srv.get("weak_tls", False)})
+        # internet.nl (domain-level, applied to every inbound MX)
+        if inl_status is not None:
+            votes.append({"source": "internetnl", "status": inl_status,
+                          "tls_version": (internetnl_result or {}).get(
+                              "tls_version", ""),
+                          "weak_tls": False})
+        return votes
+
     inbound_labels = []
     active_attempts = 0
     active_transport_fail = 0
@@ -345,17 +412,11 @@ def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
                 out["_chains"][mx] = chain
         passive_v = (_passive_verdict(passive_clients, mx, _INBOUND_PORT,
                                       "inbound") if passive_enabled else None)
-        mxt_v = None
-        if mxt_enabled:
-            local_unknown = (active_v is None or active_v["status"] == "unknown")
-            if mxt_mode == "always" or (mxt_mode == "fallback" and local_unknown):
-                try:
-                    mxt_v = mxtoolbox_client.smtp_info(mx)
-                except Exception as exc:
-                    logger.warning("MXToolbox lookup failed for %s: %s", mx, exc)
-                    mxt_v = None
+        local_unknown = (active_v is None or active_v["status"] == "unknown")
+        remote_votes = _remote_votes(mx, local_unknown)
 
-        verdict = _reconcile_inbound(mx, active_v, passive_v, mxt_v, strategy)
+        verdict = _reconcile_inbound(mx, active_v, remote_votes, passive_v,
+                                     strategy)
         if verdict.get("disagreement"):
             disagreements.append(mx)
         out["hosts"][mx] = verdict

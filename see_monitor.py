@@ -290,6 +290,20 @@ def _render_sources(svc: dict, indent: str) -> str:
     elif mxt.get("available"):
         parts.append(click.style(
             f"MXToolbox: available (mode={mxt.get('mode')})", fg="bright_black"))
+    stt = svc.get("ssltools", {})
+    if stt.get("used"):
+        parts.append(f"ssl-tools: STARTTLS {stt.get('mx_covered', 0)}/"
+                     f"{stt.get('mx_total', 0)} MX (remote active)")
+    elif stt.get("available"):
+        parts.append(click.style(
+            f"ssl-tools: available (mode={stt.get('mode')})", fg="bright_black"))
+    inl = svc.get("internetnl", {})
+    if inl.get("used"):
+        parts.append(f"internet.nl: STARTTLS {inl.get('mx_covered', 0)}/"
+                     f"{inl.get('mx_total', 0)} MX (cached batch)")
+    elif inl.get("available"):
+        parts.append(click.style("internet.nl: available (batch cache)",
+                                 fg="bright_black"))
     if not parts:
         return click.style("none configured (DNS + wordlist only)",
                            fg="bright_black")
@@ -449,6 +463,38 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
         if not force and skipped_no_mx:
             payload["skipped_no_mx"] = skipped_no_mx
         click.echo(json.dumps(payload, indent=2))
+
+
+@cli.command("internetnl-refresh")
+@click.option("--list", "list_file", type=click.Path(exists=True),
+              help="Only submit domains from this file (default: all known).")
+@click.pass_context
+def internetnl_refresh(ctx, list_file):
+    """Submit a mail batch to internet.nl and cache the results now.
+
+    Blocks until the batch completes (minutes). Normally runs on a weekly
+    schedule; use this to seed or force-refresh the cache.
+    """
+    from data.database import Database
+    from scheduler.internetnl_batch import run_internetnl_batch
+    cfg = ctx.obj["config"]
+    db = Database(cfg.get("db_path", "data/see_monitor.db"))
+    domains = None
+    if list_file:
+        with open(list_file, encoding="utf-8") as fh:
+            domains = [ln.strip() for ln in fh
+                       if ln.strip() and not ln.startswith("#")]
+    click.echo("Submitting internet.nl batch (this can take several "
+               "minutes)…")
+    res = run_internetnl_batch(cfg, db, domains=domains)
+    if res.get("skipped"):
+        click.echo(click.style(f"Skipped: {res.get('error')}", fg="yellow"))
+        return
+    if res.get("error"):
+        click.echo(click.style(f"Failed: {res['error']}", fg="red"))
+        return
+    click.echo(f"Done. request_id={res.get('request_id')}  "
+               f"submitted={res.get('submitted')}  stored={res.get('stored')}")
 
 
 @cli.command("scheduler-daemon")

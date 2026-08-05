@@ -938,7 +938,7 @@ def test_subscores_and_confidence_are_computed():
 def test_schema_v3_persists_subscores_and_confidence():
     from data.database import Database, SCHEMA_VERSION
     from scanner.assessor import assess_domain
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
     with tempfile.TemporaryDirectory() as tmp:
         db = Database(os.path.join(tmp, "v3.db"))
         run = db.create_run(["example.com"])
@@ -2064,7 +2064,7 @@ def test_check_apis_registry_and_unconfigured_skip():
     m = _load_check_apis()
     assert set(m.CHECKS) == {
         "shodan", "censys", "dnsdumpster", "securitytrails", "crtsh",
-        "mxtoolbox"}
+        "mxtoolbox", "ssltools", "internetnl"}
     empty = {}
     for svc in ("shodan", "censys", "dnsdumpster", "securitytrails"):
         res = m.CHECKS[svc](empty, 5, "example.com")
@@ -2372,3 +2372,97 @@ def test_egress25_warns_once_per_process(caplog):
     warns = [r for r in caplog.records if r.levelno == _logging.WARNING
              and "port 25" in r.getMessage()]
     assert len(warns) == 1                    # once per process, not per domain
+
+
+# ---------------------------------------------------------------------------
+# 0.8.0 — ssl-tools + internet.nl remote-active sources in the reconciler.
+# ---------------------------------------------------------------------------
+
+from scanner.ssltools_client import SSLToolsClient          # noqa: E402
+from scanner.internetnl_client import InternetNLClient      # noqa: E402
+
+
+def test_ssltools_parser_tolerant_and_freshness():
+    c = SSLToolsClient(enabled=True, freshness_days=7)
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    data = {"created_at": now, "servers": [
+        {"hostname": "mx1.example.it", "starttls": "supported",
+         "protocols": ["TLSv1.2", "TLSv1.3"]},
+        {"host": "mx2.example.it", "tls": False, "version": "TLSv1.0"}]}
+    parsed = c._parse(data)
+    assert parsed["servers"]["mx1.example.it"]["starttls"] is True
+    assert parsed["servers"]["mx1.example.it"]["tls_version"] == "TLSv1.3"
+    assert parsed["servers"]["mx2.example.it"]["starttls"] is False
+    assert parsed["servers"]["mx2.example.it"]["weak_tls"] is True
+    assert parsed["report_age_days"] is not None and parsed["report_age_days"] < 1
+
+
+class _SSLTools:
+    available = True
+
+    def __init__(self, servers, stale=False, mode="fallback"):
+        self._servers, self._stale = servers, stale
+        self.mode = mode
+
+    def mailserver_info(self, domain):
+        return {"source": "ssltools", "found": True, "stale": self._stale,
+                "report_age_days": 0.1, "servers": self._servers,
+                "raw_keys": [], "error": ""}
+
+
+def test_ssltools_rescues_egress_blocked_per_host():
+    _patch(monkey_inbound=_inbound(reachable=False, error="timed out"))
+    ss = _SSLTools({"mx.example.it": {"starttls": True,
+                                      "tls_version": "TLSv1.3",
+                                      "weak_tls": False}})
+    r = _stls.check_starttls(["mx.example.it"], None, None, active=True,
+                             timeout=3, verify_cert=False, strategy="reconcile",
+                             domain="example.it", ssltools_client=ss)
+    v = r["hosts"]["mx.example.it"]
+    assert v["status"] == "ok"
+    assert v["determined_by"] == "ssltools"
+
+
+def test_ssltools_stale_is_not_used_for_scoring():
+    _patch(monkey_inbound=_inbound(reachable=False, error="timed out"))
+    ss = _SSLTools({"mx.example.it": {"starttls": True, "tls_version": "",
+                                      "weak_tls": False}}, stale=True)
+    r = _stls.check_starttls(["mx.example.it"], None, None, active=True,
+                             timeout=3, verify_cert=False, strategy="reconcile",
+                             domain="example.it", ssltools_client=ss)
+    assert r["hosts"]["mx.example.it"]["status"] == "unknown"
+    assert any("stale" in i for i in r["issues"])
+
+
+def test_internetnl_domain_level_vote_applies_to_inbound():
+    _patch(monkey_inbound=_inbound(reachable=False, error="timed out"))
+    r = _stls.check_starttls(["mx1.example.it", "mx2.example.it"], None, None,
+                             active=True, timeout=3, verify_cert=False,
+                             strategy="reconcile", domain="example.it",
+                             internetnl_result={"starttls": "ok", "dane": "ok"})
+    assert r["hosts"]["mx1.example.it"]["status"] == "ok"
+    assert r["hosts"]["mx1.example.it"]["determined_by"] == "internetnl"
+    assert r["hosts"]["mx2.example.it"]["status"] == "ok"
+
+
+def test_internetnl_result_mapping():
+    entry = {"results": {"tests": {
+        "mail_starttls_tls_available": {"status": "passed"},
+        "mail_starttls_dane_valid": {"status": "failed"}}}}
+    m = InternetNLClient._map_domain(entry)
+    assert m["starttls"] == "ok"
+    assert m["dane"] == "no"
+
+
+def test_local_active_still_beats_remote_when_present():
+    # local active positive present -> it wins over any remote source
+    _patch(monkey_inbound=_inbound(reachable=True, ok=True))
+    ss = _SSLTools({"mx.example.it": {"starttls": False, "tls_version": "",
+                                      "weak_tls": False}}, mode="always")
+    r = _stls.check_starttls(["mx.example.it"], None, None, active=True,
+                             timeout=3, verify_cert=False, strategy="reconcile",
+                             domain="example.it", ssltools_client=ss)
+    v = r["hosts"]["mx.example.it"]
+    assert v["status"] == "ok" and v["determined_by"] == "active"
+    assert v["disagreement"] is True

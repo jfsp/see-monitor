@@ -58,6 +58,29 @@ class ScanScheduler:
         if self.scheduler:
             self.scheduler.start()
             logger.info("Scheduler started")
+            self._register_internetnl_batch()
+
+    def _register_internetnl_batch(self):
+        """Weekly internet.nl batch refresh, if credentials are configured."""
+        inl_cfg = (self.config.get("internetnl") or {})
+        if not (inl_cfg.get("username") and inl_cfg.get("password")):
+            return
+        hours = float(inl_cfg.get("batch_interval_hours", 168))  # weekly
+        if hours <= 0:
+            return
+        from scheduler.internetnl_batch import run_internetnl_batch
+
+        def _job():
+            try:
+                run_internetnl_batch(self.config, self.db)
+            except Exception as exc:                   # noqa: BLE001
+                logger.warning("internet.nl batch job failed: %s", exc)
+
+        self.scheduler.add_job(
+            _job, trigger=IntervalTrigger(hours=hours),
+            id="internetnl_batch", replace_existing=True,
+            next_run_time=datetime.now() + timedelta(minutes=5))
+        logger.info("internet.nl batch job registered (every %sh)", hours)
 
     def stop(self):
         if self.scheduler and self.scheduler.running:

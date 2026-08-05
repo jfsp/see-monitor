@@ -125,6 +125,33 @@ mxtoolbox:
   mode: fallback
   timeout: 20
 
+# ssl-tools.net (optional) — FREE remote-active SMTP TLS source (Digineo GmbH).
+# Runs STARTTLS tests from its own network, so it works even when this host
+# cannot egress port 25. Per-MX results via a JSON endpoint; no account needed.
+# NOTE: results are cached upstream and can be stale — a report older than
+# freshness_days triggers a refresh before use. Confirm acceptable automated
+# use with Digineo before enabling. Disabled by default.
+#   mode: fallback (only MX the local probe could not determine) | always | off
+ssltools:
+  enabled: false
+  mode: fallback
+  freshness_days: 7
+  timeout: 20
+
+# Internet.nl (optional) — FREE, government-backed remote-active source. Tests
+# STARTTLS/DANE per domain from its own infrastructure (egress-independent).
+# Requires an approved account (non-profit / NIS2 high-criticality qualify).
+# The API is an ASYNC BATCH, so SEE-Monitor refreshes it on a schedule and
+# reads the cached per-domain verdict at scan time (see cache_ttl_days).
+# Trigger a refresh manually with:  see_monitor.py internetnl-refresh
+internetnl:
+  username: ""            # HTTP Basic user issued on account approval
+  password: ""
+  base_url: "https://batch.internet.nl/api/batch/v2"
+  cache_ttl_days: 7       # cached verdict is used only if newer than this
+  batch_interval_hours: 168   # scheduled batch cadence (weekly)
+  timeout: 30
+
 # --- Scoring overrides (optional) -----------------------------------------
 # Anything set here overrides guidelines/nist_800_177r1.json.
 # scoring:

@@ -29,7 +29,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "data/see_monitor.db"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 # Assessments are now stored per (domain, guideline); this is the guideline
 # used when a caller does not specify one, preserving pre-v2 behaviour.
 DEFAULT_GUIDELINE_ID = "nist_800_177r1"
@@ -230,6 +230,14 @@ class Database:
                 scope        TEXT NOT NULL DEFAULT 'domain',
                 created_at   TEXT NOT NULL,
                 roadmap_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS internetnl_results (
+                domain       TEXT PRIMARY KEY,
+                starttls     TEXT,
+                dane         TEXT,
+                tls_version  TEXT,
+                request_id   TEXT,
+                checked_at   TEXT NOT NULL
             );
             """)
             row = conn.execute(
@@ -718,6 +726,29 @@ class Database:
                     "SELECT DISTINCT domain FROM domain_organisations"):
                 domains.add(r["domain"])
         return sorted(domains)
+
+    # ------------------------------------------------------------------
+    # Internet.nl batch result cache (v0.8.0)
+    # ------------------------------------------------------------------
+    def upsert_internetnl_result(self, domain: str, starttls, dane,
+                                 tls_version: str, request_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO internetnl_results "
+                "(domain, starttls, dane, tls_version, request_id, checked_at) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(domain) DO UPDATE SET starttls=?, dane=?, "
+                "tls_version=?, request_id=?, checked_at=?",
+                (domain, starttls, dane, tls_version, request_id, _now(),
+                 starttls, dane, tls_version, request_id, _now()))
+
+    def get_internetnl_result(self, domain: str) -> dict | None:
+        with self._connect() as conn:
+            r = conn.execute(
+                "SELECT domain, starttls, dane, tls_version, request_id, "
+                "checked_at FROM internetnl_results WHERE domain=?",
+                (domain,)).fetchone()
+        return dict(r) if r else None
 
     # ------------------------------------------------------------------
     # Organisations

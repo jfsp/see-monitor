@@ -1,13 +1,16 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.7.0 · **Status:** functional, all tests passing · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.8.0 · **Status:** functional, all tests passing (117) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 > Recent additions are summarised in `CHANGELOG.md` (… → **0.6.5 control-rate
 > denominators, admin-only scanning, file-based help** → 0.6.11 fix-and-refine
-> cycle → **0.7.0 active SMTP transport TLS: reconcile strategy across
-> local-active / passive / MXToolbox remote-active, 587/465 folded onto the MX
-> hosts, DANE/MTA-STS intent reconciliation, egress-25 detection, configurable
-> HELO name**).
+> cycle → **0.7.0 active SMTP transport TLS: reconcile across local-active /
+> passive / MXToolbox, 587/465 folded onto the MX hosts, DANE/MTA-STS intent
+> reconciliation, egress-25 detection + WARNING/banner, configurable HELO name**
+> → **0.8.0 two egress-independent remote-active sources: ssl-tools.net (free,
+> per-MX, synchronous, 7-day auto-refresh) and internet.nl (free, domain-level,
+> scheduled-batch + 7-day cache); N-source reconciler; schema v5
+> `internetnl_results` cache**).
 
 This document lets a new session (or engineer) resume work without re-deriving
 context. It records what exists, the invariants that must hold, deployment
@@ -287,6 +290,15 @@ very_strong_requirements}`.
 network lookup), `mode` (`fallback` default / `always` / `off`), `timeout`.
 `scanning.active_smtp` still gates all local connections.
 
+**Remote-active sources config (0.8.0):**
+- `ssltools`: `enabled` (default false), `mode` (`fallback`/`always`/`off`),
+  `freshness_days` (7 — older reports trigger `/refresh`), `timeout`.
+- `internetnl`: `username`/`password` (HTTP Basic, from approved account),
+  `base_url`, `cache_ttl_days` (7 — scan-time freshness of the cached verdict),
+  `batch_interval_hours` (168 — scheduled batch cadence), `timeout`.
+  Consumed via the scheduled batch (`scheduler/internetnl_batch.py`) → the
+  `internetnl_results` table → `ScanOrchestrator._internetnl_cached`.
+
 **Important gap:** the orchestrator reads passive-source API keys from
 `config.yaml` (`cfg.get("shodan")…`), **not** from the systemd env vars
 (`SHODAN_API_KEY`, `SECURITYTRAILS_API_KEY`, …). Those env lines are currently
@@ -379,6 +391,24 @@ detail + per-service diagnostics (works before *or* after the subcommand);
   requirement aligned with NIST §5.1), while the numeric score blends 25/587/465
   via `supported/no_tls/unknown` counts. Changing either the precedence or the
   inbound-only `all_starttls` scope shifts scores across every profile.
+- **ssl-tools JSON schema unverified (0.8.0).** `ssltools_client._parse` scans
+  several candidate key names (`servers`/`mailservers`/…, `starttls`/`tls`/…)
+  because the `?format=json` schema could not be fetched from the sandbox
+  (robots policy). It fails safe to `starttls=None`. Confirm live with
+  `scripts/check_apis.py ssltools -v <domain>` (it prints raw keys + parsed
+  rows) and tighten `_HOST_KEYS`/`_STARTTLS_KEYS`/`_VERSION_*` if needed. Also
+  verify `/refresh` works with a plain GET on the server — if it needs a CSRF
+  POST, `SSLToolsClient._refresh` must scrape the page token first.
+- **internet.nl results envelope unverified (0.8.0).** `InternetNLClient.
+  _map_domain` looks for `results.tests.mail_starttls_tls_available` etc. across
+  a couple of nestings; confirm against a real batch result once the account is
+  approved (`scripts/check_apis.py internetnl` checks auth only).
+- **internet.nl is scheduled-batch + cache, not per-scan (0.8.0).** The weekly
+  job (`scheduler/internetnl_batch.py`, registered in `ScanScheduler.start`)
+  submits all known mail domains, blocks until the batch completes (minutes),
+  and writes `internetnl_results`. Scans read that cache within
+  `internetnl.cache_ttl_days`. A scan never calls internet.nl inline. Seed/force
+  with `see_monitor.py internetnl-refresh`.
 
 ---
 
@@ -435,18 +465,20 @@ detail + per-service diagnostics (works before *or* after the subcommand);
     `mxtoolbox_client._parse_tls` against a live paid `Lookup/smtp/` response
     and tighten the positive/negative markers. Parser currently fails safe
     (unknown, never false negative). See §7.
-17. **BACKLOG — Tier 2 passive sources (more egress-independent votes).**
-    BinaryEdge (REST API, ~$10/mo) and Onyphe expose port-25 STARTTLS banners
-    in the same shape as Shodan/Censys. Wiring them as extra passive clients
-    strengthens the `reconcile` fallback and mismatch detection when local
-    egress-25 is blocked. Same `host_smtp_info(host) -> {ports:{25:{starttls}}}`
-    interface; add config blocks mirroring `shodan:`/`censys:`.
-18. **BACKLOG — Tier 3 second remote-active source (internet.nl).** internet.nl
-    batch API tests STARTTLS + DANE from its own vantage (RFC 3207/7672),
-    complementing MXToolbox as a second egress-independent active source. Open
-    source, aligns with the standards profiles; requires batch-API account
-    approval. Worth adding if egress-25 blocking on the SEE-Monitor host proves
-    common (it is on the current pqc-monitor co-host).
+17. **DONE (0.8.0) — remote-active sources.** ssl-tools.net (free, per-MX) and
+    internet.nl (free, domain-level, scheduled batch) implemented as the
+    egress-independent complement to the local probe. **Tier-2 passive dead
+    ends:** BinaryEdge shut down Mar 2025; Onyphe requires a corporate account;
+    MXToolbox free tier has 0 network lookups (SMTP needs a paid plan). No
+    remaining free passive banner source worth wiring.
+18. **OPEN — live-verify the two 0.8.0 sources** (see §7): ssl-tools JSON field
+    mapping + `/refresh` method; internet.nl results envelope + first real
+    batch. Both fail safe today; verification only improves precision.
+19. **CONSIDER — CheckTLS (paid) as a richer remote-active alternative.** Clean
+    documented web-service (`/TestReceiver`, COMPANYCODE/COMPANYPASS,
+    LEVEL=XML_DETAIL), egress-independent, email-security-native, covers most
+    controls. Corporate subscription required for production. Only if a paid,
+    commercial-grade source is ever wanted (would slot in like MXToolbox).
 
 ---
 
