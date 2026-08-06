@@ -301,12 +301,15 @@ def check_ssltools(cfg, timeout, domain):
     srv = info.get("servers", {})
     n = len(srv)
     summary = ", ".join(
-        f"{h}={'ok' if v.get('starttls') is True else 'no' if v.get('starttls') is False else '?'}"
+        (f"{h}=ok" if v.get("starttls") is True
+         else f"{h}=no" if v.get("starttls") is False
+         else f"{h}=?" + (f"({v['error']})" if v.get("error") else ""))
         for h, v in list(srv.items())[:4])
     detail = (f"{n} server(s) [{summary}], report age "
               f"{info.get('report_age_days')}d, keys={info.get('raw_keys')}")
     note = "verify JSON field mapping against this output" if n == 0 \
-        else "stale (refresh failed)" if info.get("stale") else "quota-free"
+        else "stale (refresh failed)" if info.get("stale") \
+        else "cert-only STARTTLS signal — abstains when no cert captured"
     return _r("ssltools", OK if n else FAIL, detail, note)
 
 

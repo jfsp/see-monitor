@@ -186,7 +186,14 @@ class SSLToolsClient:
             servers[host] = {
                 "starttls": st, "tls_version": ver,
                 "weak_tls": ver in _WEAK_TLS,
-                "cert_not_after": cert_expiry.get(cert_fp) if cert_fp else None}
+                "cert_not_after": cert_expiry.get(cert_fp) if cert_fp else None,
+                # Fresh reports carry a per-host probe error + PFS flag. We keep
+                # them for diagnostics only: cert capture is unreliable against
+                # many MTAs ("unexpected EOF" even where TLS clearly works), so
+                # we never infer STARTTLS from pfs/error — cert presence is the
+                # only signal we trust, and its absence stays unknown.
+                "error": srv.get("error") or "",
+                "pfs": srv.get("pfs")}
         return {"report_age_days": cls._report_age_days(data),
                 "state": (data.get("state") or "").lower(),
                 "servers": servers}

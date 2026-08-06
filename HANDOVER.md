@@ -403,6 +403,12 @@ detail + per-service diagnostics (works before *or* after the subcommand);
   stale and unused). Watch `ssltools refresh(...) POST -> <code>` in the logs.
   Note: for bulk scans on an egress-blocked host, the first pass refreshes stale
   domains (slow); subsequent passes read the now-warm upstream cache quickly.
+  **RELIABILITY (0.8.2): ssl-tools cert capture is flaky** — it returns
+  `certificate:null`/`unexpected EOF` even for MTAs that clearly support TLS
+  (e.g. ecb.europa.eu, confirmed good by internet.nl). We only trust
+  cert-presence → `ok`; cert-absence → `unknown` (never `no_tls`). Treat
+  ssl-tools as a low-yield, positive-only complement; prefer internet.nl. Full
+  analysis + improvement roadmap in §8b.
 - **internet.nl results envelope unverified (0.8.0).** `InternetNLClient.
   _map_domain` looks for `results.tests.mail_starttls_tls_available` etc. across
   a couple of nestings; confirm against a real batch result once the account is
@@ -486,7 +492,123 @@ detail + per-service diagnostics (works before *or* after the subcommand);
 
 ---
 
-## 9. Version & changelog convention
+## 8b. Internet.nl mail test vs SEE-Monitor — comparison & roadmap (0.8.2)
+
+Context: live testing (Aug 2026) of ssl-tools against bde.es, bancaditalia.it and
+ecb.europa.eu, cross-checked with internet.nl mail results and internet.nl's
+source (`checks/tasks/mail.py`, `checks/tasks/tls.py`). To be revisited once
+internet.nl API access is granted.
+
+### ssl-tools reliability verdict — KEEP but treat as opportunistic-positive-only
+The `?format=json` endpoint is thin and its live probe is unreliable:
+- The JSON exposes **no STARTTLS flag, no TLS version, no cipher/PFS** in a
+  clean scoreable form (those live only in the HTML report). It carries
+  `hosts[].certificate` (fingerprint or null), `chains`, and — on fresh reports
+  — per-host `error`/`pfs`/`duration`.
+- Cert capture **fails against many real MTAs**: refreshed reports for
+  ecb.europa.eu returned `certificate:null` + `error:"unexpected EOF"` on every
+  MX, yet internet.nl connected to those same servers and graded them **TLS 1.3
+  "good" / TLS 1.2 "sufficient"**. bancaditalia.it and bde.es behaved the same
+  (`unexpected EOF`, `pfs:true`, `certificate:null`). So a null cert does NOT
+  mean "no STARTTLS" — it is an incomplete probe (ssl-tools' prober appears to
+  be dropped/greylisted by hardened MTAs).
+- **Our handling (correct, unchanged in spirit):** cert fingerprint present →
+  `ok` (a captured cert proves a completed STARTTLS handshake); cert absent →
+  `unknown`, **never** `no_tls`, regardless of `pfs`/`error`. ssl-tools can
+  therefore only ever *confirm* STARTTLS, never deny it — a low-yield but
+  false-negative-safe positive source. 0.8.2 captures `error`/`pfs` for
+  diagnostics (`check_apis ssltools -v` shows the reason for each `?`). Do NOT
+  be tempted to infer STARTTLS from `pfs:true` — unreliable.
+- Net: ssl-tools is a weak complement. Internet.nl (reliable, egress-
+  independent, far richer) should be the primary remote source once available;
+  keep ssl-tools only for the occasional cert-confirmed positive.
+
+### Internet.nl mail test — full subtest inventory (what they check)
+- **IPv6:** name-server IPv6 addresses + reachability; **mail-server (MX) IPv6
+  addresses + reachability on :25**.
+- **DNSSEC:** existence + validity for the **email-address domain** AND
+  separately for each **mail-server (MX) domain**.
+- **Authenticity:** DMARC existence + **policy sufficiency** (incl. external
+  report-destination authorisation, organizational-domain/PSL handling), DKIM
+  existence, SPF existence + **policy** (with include/redirect lookup counting).
+- **STARTTLS / transport (the deep part — from `tls.py`):** STARTTLS available;
+  **TLS version** (1.3 good / 1.2 sufficient / 1.0-1.1 insufficient); **cipher
+  suites** (phase-out/insufficient detection); **cipher-suite order**;
+  **parameters for key exchange** (DH group / ECDH curve sizing); **hash
+  function for key exchange**; **TLS compression** (CRIME); **secure
+  renegotiation**; **client-initiated renegotiation**; **0-RTT**; **Extended
+  Master Secret (EMS)**; certificate **trust chain**, **public key**,
+  **signature algorithm**, **FQDN match**; **CAA for mail server**; **DANE
+  existence / validity / rollover scheme**.
+- **RPKI:** Route Origin Authorisation existence + route-announcement validity
+  for the mail-server IPs.
+- **NOT covered by internet.nl mail test:** MTA-STS, TLS-RPT, BIMI (confirmed
+  from `mail.py` + rendered results).
+
+### Gap analysis
+**A. internet.nl has, SEE-Monitor lacks (candidate improvements):**
+| Area | internet.nl | SEE-Monitor today |
+|---|---|---|
+| TLS cipher suites / order | graded per NCSC | not checked |
+| Key-exchange params (DH/ECDH sizing) | graded | not checked |
+| Hash function for key exchange | checked | not checked |
+| TLS compression (CRIME) | checked | not checked |
+| Secure + client renegotiation | checked | not checked |
+| 0-RTT / EMS | checked | not checked |
+| TLS-version grading (good/sufficient/insufficient) | 3-tier | only weak-flag (<1.2) |
+| Cert public-key + signature-algo grading | NCSC-graded | validity/hostname/expiry/chain/key+sig strength (close, not NCSC-graded) |
+| Per-MX DNSSEC | yes | domain-level only |
+| DANE rollover scheme | yes | existence/validity/coverage only |
+| CAA per mail server | yes | CAA on domain (DNS-HYG) only |
+| IPv6 reachability of MX (:25 connect) | yes | AAAA-presence flag only (DNS-HYG) |
+| **RPKI ROA / route validity** | yes | **not checked** |
+
+**B. SEE-Monitor has, internet.nl mail test lacks (our differentiators — keep):**
+MTA-STS (existence/policy/mode), TLS-RPT, BIMI, DKIM **key strength + Ed25519**
+recommendation, DMARC richness (alignment, `np=`/DMARCbis, ruf/GDPR, external
+auth), **4 national profiles** (NIST/BSI/ACN/CCN), DNSBL **reputation**,
+**subdomain** coverage, **client-TLS** (IMAP/POP), and the whole **multi-source
+passive+active reconciliation** architecture.
+
+### Improvement roadmap (priority order)
+1. **Source the deep TLS grading from the internet.nl API, do NOT reimplement
+   it.** Cipher suites, key-exchange, renegotiation, compression, 0-RTT, EMS and
+   NCSC-graded TLS-version/cert checks all require **connecting on port 25** —
+   which this GCP host cannot do. Reimplementing them natively is pointless
+   here. When API access lands, pull these per-domain subtest verdicts and
+   surface them as **enrichment + cross-check** against our STARTTLS verdict
+   (e.g. a new `tls_detail` block on the starttls control, and findings for
+   insufficient cipher/version/kex). This is the single biggest win and plays to
+   internet.nl's strength + our egress weakness.
+2. **RPKI ROA check — implement natively (no egress needed).** Route Origin
+   Authorisation is queryable from RPKI validators/APIs (e.g. Cloudflare
+   `rpki.cloudflare.com`, RIPE stat, or a local Routinator) using the MX A/AAAA
+   IPs + origin ASN. This is a genuinely new resilience control SEE-Monitor
+   could add on its own, independent of port-25 egress, and aligns with the
+   "resilience" sub-score. Candidate new control `rpki`.
+3. **DNS-only enrichments SEE-Monitor can add natively (no egress):** per-MX
+   DNSSEC (run the existing DNSSEC check against each MX host domain), CAA per
+   mail server (extend DNS-HYG), and DANE **rollover** (multiple TLSA records) —
+   all authoritative-DNS based, cheap, and don't need port 25.
+4. **internet.nl results envelope — extraction plan (for the next session):**
+   store per-domain subtest verdicts in a table keyed by domain (extend
+   `internetnl_results`: add `subtests_json`), map the categories to our model:
+   - `mail_starttls_tls_available` → STARTTLS vote (already wired).
+   - `mail_starttls_tls_*` (version/ciphers/kex/hash/compress/reneg/0rtt/ems) →
+     new `tls_detail` enrichment + findings.
+   - `mail_starttls_cert_*` → cross-check our cert analysis.
+   - `mail_starttls_dane_*` → cross-check DANE (existence/valid/rollover).
+   - `mail_ipv6_mx_*` → cross-check DNS-HYG AAAA + add reachability.
+   - `mail_dnssec_mailto_*` / `mail_dnssec_mx_*` → per-MX DNSSEC.
+   - `mail_rpki_*` → seed the native RPKI control (or use directly).
+   Keep internet.nl as **enrichment/cross-check**, not a replacement: it does not
+   test MTA-STS/TLS-RPT/BIMI and is single-profile, whereas SEE-Monitor's
+   multi-profile scoring + those controls are the product's differentiators.
+5. **Decision to make next session:** whether internet.nl's graded TLS subtests
+   should *feed scoring* (new weighted sub-controls per profile) or only appear
+   as findings/enrichment. Recommend enrichment first (findings + `tls_detail`),
+   then consider a `tls_hardening` sub-score once the mapping is validated live.
+
 
 - Version is single-sourced from the `VERSION` file (read by `version.py`).
   Now at **0.6.11**. Trajectory: 0.2.0 (passive sources, CLI) → 0.3.0 (national

@@ -24,6 +24,14 @@ Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 - **Startup "External sources" line lists enabled remote sources** (MXToolbox,
   ssl-tools, internet.nl) alongside SecurityTrails/DNSDumpster/Shodan/Censys.
 - `scan --json` adds `egress25_unresolved_domains`.
+- **ssl-tools reliability documented; diagnostics surfaced.** Live testing shows
+  ssl-tools' cert capture is unreliable (`certificate:null`/`unexpected EOF`
+  even for MTAs that clearly support TLS, per internet.nl cross-check). Handling
+  is unchanged and safe (cert → `ok`, else `unknown`, never `no_tls`); the
+  per-host probe `error`/`pfs` are now captured and shown by
+  `check_apis ssltools -v`. Full internet.nl-vs-SEE-Monitor comparison and an
+  improvement roadmap (deep TLS grading via internet.nl API; native RPKI/per-MX
+  DNSSEC/CAA) are documented in HANDOVER §8b.
 
 ## [0.8.1] — 2026-08-06
 
