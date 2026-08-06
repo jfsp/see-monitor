@@ -1,6 +1,6 @@
 # SEE-Monitor — Handover
 
-**Version:** 0.8.1 · **Status:** functional, all tests passing (118) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
+**Version:** 0.8.2 · **Status:** functional, all tests passing (121) · **Standards:** NIST SP 800-177r1 (default) + BSI TR-03182, ACN, CCN-CERT BP/02 profiles
 
 > Recent additions are summarised in `CHANGELOG.md` (… → **0.6.5 control-rate
 > denominators, admin-only scanning, file-based help** → 0.6.11 fix-and-refine
@@ -391,15 +391,18 @@ detail + per-service diagnostics (works before *or* after the subcommand);
   requirement aligned with NIST §5.1), while the numeric score blends 25/587/465
   via `supported/no_tls/unknown` counts. Changing either the precedence or the
   inbound-only `all_starttls` scope shifts scores across every profile.
-- **ssl-tools JSON schema RESOLVED (0.8.1), `/refresh` still to confirm.** The
-  live `?format=json` shape is `{hostname, state, created_at, hosts:[{hostname,
-  certificate:<fp>,preference}], chains:[[{fingerprint,not_after,…}]]}` — no
-  starttls/TLS-version fields. `_parse` derives STARTTLS from certificate
-  presence and reads `not_after`; timestamps like `"2020-05-27 00:33:07 UTC"`
-  now parse (freshness works). STILL OPEN: confirm `/refresh` actually produces
-  a fresh report via plain GET on the server (bde.es's cached report is from
-  2020, so it is marked stale and NOT used unless refresh succeeds). If refresh
-  needs a CSRF POST, `SSLToolsClient._refresh` must scrape the page token.
+- **ssl-tools schema + refresh RESOLVED (0.8.1/0.8.2), verify refresh outcome
+  live.** JSON shape `{hostname,state,created_at,hosts:[{hostname,certificate:
+  <fp>,preference}],chains:[...]}` — no starttls/TLS fields; `_parse` derives
+  STARTTLS from certificate presence and reads `not_after`; timestamps parse.
+  `/refresh` is a Rails **POST** guarded by CSRF (a GET 404s) — `_refresh`
+  scrapes the page's `csrf-token` meta + session cookie and POSTs with
+  `X-CSRF-Token`, then polls up to `refresh_wait` (25s). STILL TO CONFIRM on the
+  server: that the POST actually queues a fresh test and the report age drops
+  (bde.es's cached report is from 2020; until refresh succeeds it is marked
+  stale and unused). Watch `ssltools refresh(...) POST -> <code>` in the logs.
+  Note: for bulk scans on an egress-blocked host, the first pass refreshes stale
+  domains (slow); subsequent passes read the now-warm upstream cache quickly.
 - **internet.nl results envelope unverified (0.8.0).** `InternetNLClient.
   _map_domain` looks for `results.tests.mail_starttls_tls_available` etc. across
   a couple of nestings; confirm against a real batch result once the account is

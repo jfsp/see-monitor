@@ -75,8 +75,9 @@ def _warn_egress_once():
             "Outbound TCP port 25 appears BLOCKED on this host — every local "
             "SMTP connection failed at the transport layer. Inbound STARTTLS "
             "verdicts will rely on passive (Shodan/Censys) and, if configured, "
-            "remote-active (MXToolbox) sources. On GCP this block is permanent "
-            "and cannot be lifted; see HANDOVER for egress-independent options.")
+            "remote-active sources (ssl-tools, internet.nl, MXToolbox). On GCP "
+            "this block is permanent and cannot be lifted; see HANDOVER for "
+            "egress-independent options.")
         _EGRESS_WARNED = True
 
 
@@ -505,13 +506,29 @@ def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
             and active_transport_fail == active_attempts:
         out["egress25_blocked"] = True
         _warn_egress_once()
-        out["issues"].append(
-            "Every local port-25 connection failed at the transport layer — "
-            "this is almost certainly outbound port 25 blocked on the "
-            "SEE-Monitor host, not the target servers. STARTTLS verdicts here "
-            "rely on passive/remote sources; enable a remote-active source "
-            "(ssl-tools or internet.nl are free; MXToolbox is paid) for an "
-            "egress-independent result.")
+        # Was the block actually harmful? Report by outcome, not boilerplate.
+        inbound_unknown = [m for m in inbound_labels
+                           if out["hosts"][m]["status"] == "unknown"]
+        resolved_by = sorted({out["hosts"][m].get("determined_by")
+                              for m in inbound_labels
+                              if out["hosts"][m]["status"] in ("ok", "no_tls")
+                              and out["hosts"][m].get("determined_by")
+                              not in (None, "none", "active")})
+        base = ("Outbound port 25 is blocked on this host — local STARTTLS "
+                "probing could not connect. ")
+        if inbound_unknown:
+            out["issues"].append(
+                base + f"{len(inbound_unknown)} inbound host(s) could not be "
+                "resolved: " + ", ".join(inbound_unknown) + ". Enable a working "
+                "remote-active source (ssl-tools or internet.nl are free; "
+                "MXToolbox is paid) for an egress-independent result.")
+        elif resolved_by:
+            out["issues"].append(
+                base + "all inbound verdicts were resolved from other sources ("
+                + ", ".join(resolved_by) + ") — no action needed.")
+        else:
+            out["issues"].append(base + "inbound verdicts came from passive "
+                                 "scan data.")
 
     # ---- issues ------------------------------------------------------
     no_tls = [m for m in inbound_labels if out["hosts"][m]["status"] == "no_tls"]

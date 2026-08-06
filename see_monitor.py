@@ -373,7 +373,9 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
     if not as_json and not quiet:
         active = [n for n, s in (
             ("SecurityTrails", orch.securitytrails), ("DNSDumpster", orch.dnsdumpster),
-            ("Shodan", orch.shodan), ("Censys", orch.censys)) if s.available]
+            ("Shodan", orch.shodan), ("Censys", orch.censys),
+            ("MXToolbox", orch.mxtoolbox), ("ssl-tools", orch.ssltools),
+            ("internet.nl", orch.internetnl)) if getattr(s, "available", False)]
         click.echo("Scanning {} domain(s). External sources: {}".format(
             len(targets),
             ", ".join(active) if active else "none (authoritative DNS + wordlist)"))
@@ -415,12 +417,17 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
     run_id = db.create_run(targets, trigger="cli")
     results = []
     egress25_domains = []
+    egress25_unresolved = []
     for d in targets:
         scan_res = orch.scan_domain(d)
         db.save_scan_result(run_id, scan_res)
-        if (scan_res.get("checks", {}).get("starttls", {})
-                .get("egress25_blocked")):
+        st = scan_res.get("checks", {}).get("starttls", {})
+        if st.get("egress25_blocked"):
             egress25_domains.append(d)
+            inbound_unknown = [h for h, v in (st.get("hosts") or {}).items()
+                               if ":" not in h and v.get("status") == "unknown"]
+            if inbound_unknown:
+                egress25_unresolved.append(d)
         assessments = assess_all_profiles(scan_res, cfg, gids)
         for gid, a in assessments.items():
             db.save_assessment(run_id, a)
@@ -442,25 +449,34 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
             click.echo()
     db.finish_run(run_id)
     if egress25_domains and not as_json and not quiet:
-        click.echo(click.style(
-            "⚠ Outbound port 25 is BLOCKED on this host", fg="yellow",
-            bold=True))
-        click.echo(click.style(
-            f"  Local STARTTLS probing failed at the transport layer on "
-            f"{len(egress25_domains)} domain(s); inbound (:25) verdicts fell "
-            "back to passive/remote sources or were left 'unknown'.",
-            fg="yellow"))
-        click.echo(click.style(
-            "  This is a host/provider restriction (permanent on GCP). For an "
-            "egress-independent result enable a remote-active source — "
-            "ssl-tools or internet.nl (free) or MXToolbox (paid) — or run "
-            "SEE-Monitor where port 25 egress is permitted.",
-            fg="bright_black"))
+        if egress25_unresolved:
+            click.echo(click.style(
+                "⚠ Outbound port 25 is BLOCKED and some verdicts are "
+                "unresolved", fg="yellow", bold=True))
+            click.echo(click.style(
+                f"  Local STARTTLS probing could not connect on "
+                f"{len(egress25_domains)} domain(s); "
+                f"{len(egress25_unresolved)} still have inbound host(s) left "
+                "'unknown': " + ", ".join(egress25_unresolved[:10])
+                + ("" if len(egress25_unresolved) <= 10 else " …"),
+                fg="yellow"))
+            click.echo(click.style(
+                "  Enable a working remote-active source for those — ssl-tools "
+                "or internet.nl (free) or MXToolbox (paid). This block is a "
+                "host/provider restriction (permanent on GCP).",
+                fg="bright_black"))
+        else:
+            click.echo(click.style(
+                f"ℹ Outbound port 25 is blocked on this host, but all inbound "
+                f"STARTTLS verdicts were resolved from other sources "
+                f"({len(egress25_domains)} domain(s)) — no action needed.",
+                fg="bright_black"))
         click.echo()
     if as_json:
         payload = {"results": results}
         if egress25_domains:
             payload["egress25_blocked_domains"] = egress25_domains
+            payload["egress25_unresolved_domains"] = egress25_unresolved
         if not force and skipped_no_mx:
             payload["skipped_no_mx"] = skipped_no_mx
         click.echo(json.dumps(payload, indent=2))

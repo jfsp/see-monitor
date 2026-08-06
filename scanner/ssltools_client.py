@@ -32,6 +32,7 @@ Copyright (C) 2026 SEE-Monitor Contributors
 AI-assisted development: portions generated with Claude (Anthropic)
 """
 
+import re
 import time
 import logging
 from datetime import datetime, timezone
@@ -67,7 +68,7 @@ def _best_version(values) -> str:
 class SSLToolsClient:
     def __init__(self, enabled: bool = False, mode: str = "fallback",
                  freshness_days: int = 7, timeout: int = 20,
-                 refresh_wait: int = 20):
+                 refresh_wait: int = 25):
         self.enabled = bool(enabled)
         self.mode = (mode or "fallback").lower()   # off | fallback | always
         self.freshness_days = int(freshness_days)
@@ -199,10 +200,27 @@ class SSLToolsClient:
         return resp.json()
 
     def _refresh(self, domain: str) -> None:
-        """Best-effort trigger of a fresh test. Tolerant of GET/redirect."""
+        """Trigger a fresh test. The /refresh route is a Rails POST guarded by
+        CSRF (a plain GET 404s), so fetch the page for the csrf-token + session
+        cookie, then POST with X-CSRF-Token. Best-effort; tolerant of failure."""
         try:
-            self._session.get(f"{_BASE}/{domain}/refresh",
-                              timeout=self.timeout, allow_redirects=True)
+            page = self._session.get(
+                f"{_BASE}/{domain}", timeout=self.timeout,
+                headers={"Accept": "text/html"})
+            token = None
+            m = re.search(
+                r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)',
+                page.text)
+            if m:
+                token = m.group(1)
+            headers = {"X-Requested-With": "XMLHttpRequest"}
+            if token:
+                headers["X-CSRF-Token"] = token
+            r = self._session.post(f"{_BASE}/{domain}/refresh",
+                                   headers=headers, timeout=self.timeout,
+                                   allow_redirects=True)
+            logger.info("ssltools refresh(%s) POST -> %s (csrf=%s)",
+                        domain, r.status_code, "yes" if token else "no")
         except Exception as exc:                       # noqa: BLE001
             logger.info("ssltools refresh(%s) failed: %s", domain, exc)
 
@@ -238,7 +256,7 @@ class SSLToolsClient:
                         "requesting refresh", domain, out["report_age_days"],
                         state or "?")
             self._refresh(domain)
-            deadline = min(self.refresh_wait, 40)
+            deadline = min(self.refresh_wait, 60)
             waited = 0
             while waited < deadline:
                 time.sleep(5)

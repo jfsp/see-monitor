@@ -4,6 +4,27 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.8.2] — 2026-08-06
+
+### Fixed
+- **ssl-tools `/refresh` now works (CSRF POST).** The refresh route is a Rails
+  POST guarded by CSRF — a plain GET 404s (which is why stale reports were never
+  refreshed). The client now fetches the page for its `csrf-token` meta + session
+  cookie and POSTs `/mailservers/<domain>/refresh` with `X-CSRF-Token`, then
+  polls for the fresh report. `refresh_wait` default raised to 25s (cap 60s) so
+  the ~14s upstream re-test can complete.
+- **Egress-25 messaging is now outcome-aware.** Instead of always advising to
+  "enable a remote-active source", the STARTTLS issue and the CLI banner now
+  report what actually happened: if the port-25 block was harmless (all inbound
+  verdicts resolved from other sources) it says so and names them; only when
+  inbound host(s) remain `unknown` does it advise enabling/fixing a source. The
+  once-per-process WARNING lists all remote sources, not just MXToolbox.
+
+### Changed
+- **Startup "External sources" line lists enabled remote sources** (MXToolbox,
+  ssl-tools, internet.nl) alongside SecurityTrails/DNSDumpster/Shodan/Censys.
+- `scan --json` adds `egress25_unresolved_domains`.
+
 ## [0.8.1] — 2026-08-06
 
 ### Changed

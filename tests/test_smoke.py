@@ -2522,3 +2522,29 @@ def test_timeout_submission_port_stays_unknown():
                              timeout=3, verify_cert=False, strategy="reconcile")
     assert r["hosts"]["mx.example.it:587"]["status"] == "unknown"
     assert r["na_count"] == 0
+
+
+def test_ssltools_refresh_uses_csrf_post():
+    # /refresh is a Rails POST guarded by CSRF; verify we scrape the meta token
+    # and POST it (a plain GET 404s upstream).
+    c = SSLToolsClient(enabled=True)
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        text = ('<meta name="csrf-token" content="TOK123==">'
+                '<meta name="csrf-param" content="authenticity_token">')
+
+    class _Sess:
+        headers = {}
+        def get(self, url, **kw):
+            return _Resp()
+        def post(self, url, **kw):
+            captured["url"] = url
+            captured["headers"] = kw.get("headers", {})
+            return _Resp()
+
+    c._session = _Sess()
+    c._refresh("bde.es")
+    assert captured["url"].endswith("/mailservers/bde.es/refresh")
+    assert captured["headers"].get("X-CSRF-Token") == "TOK123=="
