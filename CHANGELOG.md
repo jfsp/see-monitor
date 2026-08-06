@@ -4,6 +4,40 @@ All notable changes to SEE-Monitor are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 Semantic Versioning. Commit trailer used: `Assisted-by: Claude (Anthropic)`.
 
+## [0.8.1] — 2026-08-06
+
+### Changed
+- **Closed submission/implicit ports (587/465) scored n/a, not unknown.** A TCP
+  RST (connection refused / errno 111) means the host is reachable but offers no
+  service on that port — not a security failure — so it is now excluded from the
+  STARTTLS tally (`na_count`, `by_port[*].na`) instead of counting as `unknown`
+  and dragging the score/confidence. A *timeout* (filtered/egress-blocked) still
+  stays `unknown`. Inbound port 25 is unaffected. `scan -v` shows these as `n/a`.
+
+### Fixed
+- **ssl-tools JSON parser corrected to the real schema** (verified live). The
+  `?format=json` payload is far thinner than the HTML report: it carries no
+  `starttls` flag or TLS version, only `hosts[]` (with a `certificate`
+  fingerprint) and cert `chains`. STARTTLS support is now derived from
+  certificate presence (a presented cert proves a successful STARTTLS
+  handshake); absence stays `unknown`, never a false `no_tls`. Previously the
+  parser looked for a non-existent `starttls` field, always returned `unknown`,
+  and ssl-tools never contributed a verdict.
+- **ssl-tools report timestamp parsing.** `"YYYY-MM-DD HH:MM:SS UTC"` was not
+  recognised (age came back `None`), so the freshness check never fired and the
+  client always served the stale cached report. Timestamps now parse and the
+  `freshness_days` refresh triggers as intended; `state` (`done`) is also
+  factored into freshness, and the post-refresh poll waits for a fresh report.
+- **Egress-25 guidance now lists all remote-active sources** (ssl-tools and
+  internet.nl free, MXToolbox paid) in the STARTTLS issue text and the CLI
+  end-of-run banner, instead of naming MXToolbox only.
+
+### Notes
+- `scripts/check_apis.py ssltools --domain <d> -v` now prints the derived
+  STARTTLS per host (e.g. `smtp.bde.es=ok`) alongside the raw keys.
+- The check runs with `--domain <d>`; a bare positional (e.g. `ssltools bde.es`)
+  is parsed as a service name, not a domain.
+
 ## [0.8.0] — 2026-08-06
 
 ### Added

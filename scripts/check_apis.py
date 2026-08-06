@@ -298,8 +298,12 @@ def check_ssltools(cfg, timeout, domain):
     info = client.mailserver_info(domain)
     if info.get("error") and not info.get("servers"):
         return _r("ssltools", FAIL, info["error"])
-    n = len(info.get("servers", {}))
-    detail = (f"{n} server row(s), report age "
+    srv = info.get("servers", {})
+    n = len(srv)
+    summary = ", ".join(
+        f"{h}={'ok' if v.get('starttls') is True else 'no' if v.get('starttls') is False else '?'}"
+        for h, v in list(srv.items())[:4])
+    detail = (f"{n} server(s) [{summary}], report age "
               f"{info.get('report_age_days')}d, keys={info.get('raw_keys')}")
     note = "verify JSON field mapping against this output" if n == 0 \
         else "stale (refresh failed)" if info.get("stale") else "quota-free"

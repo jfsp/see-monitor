@@ -219,7 +219,7 @@ def _render_scan(scan: dict, a: dict, verbose: bool,
         rec("MTA-STS", f"mode={sts.get('mode')} fetched={sts.get('policy_fetched')}")
 
     st = checks.get("starttls", {})
-    _stat = {"ok": "ok", "no_tls": "no", "unknown": "unknown"}
+    _stat = {"ok": "ok", "no_tls": "no", "unknown": "unknown", "na": "n/a"}
     if st.get("egress25_blocked"):
         rec("STARTTLS", click.style(
             "outbound port 25 appears BLOCKED on this host — inbound verdicts "
@@ -452,8 +452,9 @@ def scan(ctx, domains, list_file, as_json, quiet, verbose_opt, profiles_opt,
             fg="yellow"))
         click.echo(click.style(
             "  This is a host/provider restriction (permanent on GCP). For an "
-            "egress-independent result configure MXToolbox (paid) or a passive "
-            "source, or run SEE-Monitor where port 25 egress is permitted.",
+            "egress-independent result enable a remote-active source — "
+            "ssl-tools or internet.nl (free) or MXToolbox (paid) — or run "
+            "SEE-Monitor where port 25 egress is permitted.",
             fg="bright_black"))
         click.echo()
     if as_json:

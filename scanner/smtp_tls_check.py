@@ -257,6 +257,15 @@ def _reconcile_inbound(mx, active_v, remote_votes, passive_v, strategy):
     return out
 
 
+def _port_closed(err: str) -> bool:
+    """A TCP RST (connection refused / errno 111) means the port is closed —
+    the host is reachable but offers no service there. That is not a security
+    failure for optional submission/implicit ports, so it is scored n/a, unlike
+    a timeout (filtered/egress-blocked), which stays unknown."""
+    e = (err or "").lower()
+    return "refused" in e or "errno 111" in e
+
+
 def _submission_entry(mx, port, timeout, helo_name, passive_clients):
     """Local active submission (587) probe with passive fallback."""
     r = probe_submission_starttls(mx, port, timeout=timeout,
@@ -264,6 +273,8 @@ def _submission_entry(mx, port, timeout, helo_name, passive_clients):
     if r["reachable"]:
         status = "ok" if r["starttls_ok"] else "no_tls"
         src = "active"
+    elif _port_closed(r.get("error", "")):
+        status, src = "na", "active"          # port closed -> no submission svc
     else:
         pv = _passive_verdict(passive_clients, mx, port, "submission")
         if pv is not None:
@@ -283,6 +294,8 @@ def _implicit_entry(mx, port, timeout, passive_clients):
     if r["reachable"]:
         status = "ok" if r["starttls_ok"] else "no_tls"
         src = "active"
+    elif _port_closed(r.get("error", "")):
+        status, src = "na", "active"          # port closed -> no implicit svc
     else:
         pv = _passive_verdict(passive_clients, mx, port, "implicit")
         if pv is not None:
@@ -324,7 +337,8 @@ def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
     out = {"control": "starttls", "applicable": bool(mx_hosts),
            "strategy": strategy, "helo_name": helo_name,
            "hosts": {}, "supported_count": 0, "no_tls_count": 0,
-           "unknown_count": 0, "total": 0, "mx_count": len(mx_hosts or []),
+           "unknown_count": 0, "total": 0, "na_count": 0,
+           "mx_count": len(mx_hosts or []),
            "coverage": None, "all_starttls": None, "any_weak_tls": False,
            "any_auth_before_tls": False, "any_cert_invalid": False,
            "any_cert_hostname_mismatch": False, "confidence": "high",
@@ -434,9 +448,11 @@ def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
 
     # ---- tally (blended over all entries) ----------------------------
     by_port = {}
+    na_count = 0
     for label, v in out["hosts"].items():
         port = v.get("port", _INBOUND_PORT)
-        bp = by_port.setdefault(port, {"ok": 0, "no_tls": 0, "unknown": 0})
+        bp = by_port.setdefault(port, {"ok": 0, "no_tls": 0, "unknown": 0,
+                                       "na": 0})
         st = v["status"]
         if st == "ok":
             out["supported_count"] += 1
@@ -444,6 +460,11 @@ def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
         elif st == "no_tls":
             out["no_tls_count"] += 1
             bp["no_tls"] += 1
+        elif st == "na":
+            # closed port (no submission/implicit service) — not scored
+            na_count += 1
+            bp["na"] += 1
+            continue
         else:
             out["unknown_count"] += 1
             bp["unknown"] += 1
@@ -465,6 +486,7 @@ def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
                 out["issues"].append(issue)
 
     out["total"] = len(out["hosts"])
+    out["na_count"] = na_count
     out["by_port"] = by_port
     known = out["supported_count"] + out["no_tls_count"]
     out["coverage"] = round(out["supported_count"] / known, 2) if known else None
@@ -487,8 +509,9 @@ def check_starttls(mx_hosts, shodan_client=None, censys_client=None,
             "Every local port-25 connection failed at the transport layer — "
             "this is almost certainly outbound port 25 blocked on the "
             "SEE-Monitor host, not the target servers. STARTTLS verdicts here "
-            "rely on passive/remote sources; enable MXToolbox (remote active) "
-            "for an egress-independent result.")
+            "rely on passive/remote sources; enable a remote-active source "
+            "(ssl-tools or internet.nl are free; MXToolbox is paid) for an "
+            "egress-independent result.")
 
     # ---- issues ------------------------------------------------------
     no_tls = [m for m in inbound_labels if out["hosts"][m]["status"] == "no_tls"]

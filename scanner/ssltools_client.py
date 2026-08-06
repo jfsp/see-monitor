@@ -110,19 +110,31 @@ class SSLToolsClient:
         v = cls._first(srv, _VERSION_KEYS)
         return str(v) if v else ""
 
+    @staticmethod
+    def _parse_ts(raw):
+        s = str(raw).strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%d %H:%M:%S %Z",
+                    "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+        try:
+            return parsedate_to_datetime(s)
+        except (TypeError, ValueError):
+            return None
+
     @classmethod
     def _report_age_days(cls, data: dict):
         raw = cls._first(data, _CREATED_KEYS)
         if not raw:
             return None
-        dt = None
-        try:
-            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        except ValueError:
-            try:
-                dt = parsedate_to_datetime(str(raw))
-            except (TypeError, ValueError):
-                dt = None
+        dt = cls._parse_ts(raw)
         if dt is None:
             return None
         if dt.tzinfo is None:
@@ -131,29 +143,51 @@ class SSLToolsClient:
 
     @classmethod
     def _parse(cls, data: dict) -> dict:
-        """Return {report_age_days, servers:{host:{starttls,tls_version,...}}}."""
+        """
+        Parse the (thin) ssl-tools JSON. Real shape:
+          {hostname, state, created_at, hosts:[{hostname,address,preference,
+           certificate:<fp>}], chains:[[{fingerprint,subject,not_before,
+           not_after}, ...]]}
+        The JSON carries NO starttls flag or TLS version — a presented
+        certificate (host.certificate + a matching chain) is proof that a
+        STARTTLS handshake succeeded, so cert-presence => starttls True.
+        Absence is left as unknown (never a false no_tls).
+        """
+        # leaf-cert expiry by fingerprint (chain[0] is the leaf)
+        cert_expiry = {}
+        for chain in (data.get("chains") or []):
+            if isinstance(chain, list) and chain and isinstance(chain[0], dict):
+                fp = chain[0].get("fingerprint")
+                if fp:
+                    cert_expiry[fp] = chain[0].get("not_after")
+
+        hosts = data.get("hosts")
+        if not isinstance(hosts, list):
+            for k in _SERVER_LIST_KEYS:
+                if isinstance(data.get(k), list):
+                    hosts = data[k]
+                    break
+
         servers = {}
-        raw_list = None
-        for k in _SERVER_LIST_KEYS:
-            if isinstance(data.get(k), list):
-                raw_list = data[k]
-                break
-        if raw_list is None and isinstance(data.get("mailservers"), dict):
-            # some shapes nest incoming/outgoing
-            raw_list = (data["mailservers"].get("incoming")
-                        or data["mailservers"].get("servers"))
-        for srv in (raw_list or []):
+        for srv in (hosts or []):
             if not isinstance(srv, dict):
                 continue
             host = cls._first(srv, _HOST_KEYS)
             if not host:
                 continue
             host = str(host).rstrip(".").lower()
+            cert_fp = (srv.get("certificate") or srv.get("cert")
+                       or srv.get("fingerprint"))
+            st = cls._server_starttls(srv)           # explicit field, if any
+            if st is None and cert_fp:
+                st = True                            # cert presented => STARTTLS
             ver = cls._server_version(srv)
-            servers[host] = {"starttls": cls._server_starttls(srv),
-                             "tls_version": ver,
-                             "weak_tls": ver in _WEAK_TLS}
+            servers[host] = {
+                "starttls": st, "tls_version": ver,
+                "weak_tls": ver in _WEAK_TLS,
+                "cert_not_after": cert_expiry.get(cert_fp) if cert_fp else None}
         return {"report_age_days": cls._report_age_days(data),
+                "state": (data.get("state") or "").lower(),
                 "servers": servers}
 
     # -- HTTP ---------------------------------------------------------------
@@ -191,23 +225,38 @@ class SSLToolsClient:
         out["raw_keys"] = sorted(data.keys()) if isinstance(data, dict) else []
         parsed = self._parse(data if isinstance(data, dict) else {})
         age = parsed["report_age_days"]
+        state = parsed["state"]
         out["report_age_days"] = round(age, 1) if age is not None else None
 
-        # Refresh if the cached report is older than the freshness window.
-        if age is not None and age > self.freshness_days:
-            logger.info("ssltools report for %s is %.1f days old (>%d) — "
-                        "requesting refresh", domain, age, self.freshness_days)
-            self._refresh(domain)
-            time.sleep(min(self.refresh_wait, 20))
-            try:
-                data = self._get_json(domain)
-                parsed = self._parse(data)
-                age = parsed["report_age_days"]
-                out["report_age_days"] = round(age, 1) if age is not None else None
-            except Exception as exc:                   # noqa: BLE001
-                logger.info("ssltools re-fetch %s failed: %s", domain, exc)
+        def _fresh(a, s):
+            return (a is not None and a <= self.freshness_days
+                    and (s in ("", "done")))
 
-        out["stale"] = bool(age is not None and age > self.freshness_days)
+        # Refresh if the cached report is stale or unparseable, then poll.
+        if not _fresh(age, state):
+            logger.info("ssltools report for %s stale (age=%s, state=%s) — "
+                        "requesting refresh", domain, out["report_age_days"],
+                        state or "?")
+            self._refresh(domain)
+            deadline = min(self.refresh_wait, 40)
+            waited = 0
+            while waited < deadline:
+                time.sleep(5)
+                waited += 5
+                try:
+                    data = self._get_json(domain)
+                    parsed = self._parse(data)
+                    age = parsed["report_age_days"]
+                    state = parsed["state"]
+                    out["report_age_days"] = round(age, 1) \
+                        if age is not None else None
+                    if _fresh(age, state):
+                        break
+                except Exception as exc:               # noqa: BLE001
+                    logger.info("ssltools re-fetch %s failed: %s", domain, exc)
+                    break
+
+        out["stale"] = not _fresh(age, state)
         out["servers"] = parsed["servers"]
         out["found"] = bool(parsed["servers"])
         if not parsed["servers"]:

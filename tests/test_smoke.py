@@ -2466,3 +2466,59 @@ def test_local_active_still_beats_remote_when_present():
     v = r["hosts"]["mx.example.it"]
     assert v["status"] == "ok" and v["determined_by"] == "active"
     assert v["disagreement"] is True
+
+
+def test_ssltools_real_schema_cert_presence_is_starttls():
+    # ssl-tools ?format=json carries no starttls flag; a presented certificate
+    # (host.certificate + matching chain) proves a STARTTLS handshake.
+    c = SSLToolsClient(enabled=True, freshness_days=7)
+    data = {"hostname": "bde.es", "state": "done",
+            "created_at": "2020-05-27 00:33:07 UTC",
+            "hosts": [{"hostname": "smtp.bde.es", "address": "77.73.203.13",
+                       "preference": 5, "certificate": "f642d92b"}],
+            "chains": [[{"fingerprint": "f642d92b", "subject": "smtp.bde.es",
+                         "not_after": "2021-03-09 09:28:50 UTC"}]]}
+    p = c._parse(data)
+    assert p["state"] == "done"
+    assert p["report_age_days"] is not None and p["report_age_days"] > 2000
+    s = p["servers"]["smtp.bde.es"]
+    assert s["starttls"] is True
+    assert s["cert_not_after"] == "2021-03-09 09:28:50 UTC"
+    # host without a certificate stays unknown (never a false no_tls)
+    p2 = c._parse({"state": "done", "created_at": "2026-08-01 00:00:00 UTC",
+                   "hosts": [{"hostname": "mx.example.it"}], "chains": []})
+    assert p2["servers"]["mx.example.it"]["starttls"] is None
+
+
+def test_closed_submission_ports_are_na_not_unknown():
+    # 587/465 connection-refused (port closed) must not drag the STARTTLS score:
+    # scored n/a, excluded from supported/no_tls/unknown, confidence stays high.
+    def refused(h, p, timeout, helo_name=None):
+        return {"reachable": False, "starttls_ok": False, "tls_version": "",
+                "weak_tls": False, "error": "[Errno 111] Connection refused"}
+    _patch(monkey_inbound=_inbound(reachable=True, ok=True))
+    _stls.probe_submission_starttls = refused
+    _stls.probe_implicit_tls = lambda h, p, timeout: refused(h, p, timeout)
+    r = _stls.check_starttls(["smtp.bde.es"], None, None, active=True,
+                             timeout=3, verify_cert=False, strategy="reconcile")
+    assert r["hosts"]["smtp.bde.es:587"]["status"] == "na"
+    assert r["hosts"]["smtp.bde.es:465"]["status"] == "na"
+    assert r["na_count"] == 2
+    assert r["unknown_count"] == 0
+    assert r["coverage"] == 1.0
+    assert r["confidence"] == "high"
+    assert not any("587" in i or "465" in i for i in r["issues"])
+
+
+def test_timeout_submission_port_stays_unknown():
+    # a TIMEOUT (filtered), unlike refused, remains unknown (we don't know).
+    def timed_out(h, p, timeout, helo_name=None):
+        return {"reachable": False, "starttls_ok": False, "tls_version": "",
+                "weak_tls": False, "error": "timed out"}
+    _patch(monkey_inbound=_inbound(reachable=True, ok=True))
+    _stls.probe_submission_starttls = timed_out
+    _stls.probe_implicit_tls = lambda h, p, timeout: timed_out(h, p, timeout)
+    r = _stls.check_starttls(["mx.example.it"], None, None, active=True,
+                             timeout=3, verify_cert=False, strategy="reconcile")
+    assert r["hosts"]["mx.example.it:587"]["status"] == "unknown"
+    assert r["na_count"] == 0
